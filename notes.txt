@@ -1,0 +1,16 @@
+// deployment commands
+Compress-Archive -Path * -DestinationPath app.zip -Force
+az functionapp deployment source config-zip --resource-group rg-marketdata-dev-eastus --name marketdata-func-0916-narasimha --src app.zip --build-remote true
+
+
+
+// recreate and deployment
+Get-ChildItem -Exclude app.zip | Compress-Archive -DestinationPath app.zip -Force
+az functionapp deployment source config-zip --resource-group rg-marketdata-dev-eastus --name marketdata-func-0916-narasimha --src app.zip --build-remote 
+
+
+//local setup
+step1: python -m venv .venv
+step2: .\.venv\Scripts\Activate
+step3: pip install -r requirements.txt
+step4: func start

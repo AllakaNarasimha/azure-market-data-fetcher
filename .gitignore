@@ -1,0 +1,28 @@
+__pycache__/
+*.pyc
+.venv/
+authenticate.log
+broker_authenticate.notes.md
+local_data/broker_tokens/
+# Ignore all local data/cache and local settings used for development/testing
+local_data/
+local.settings.json
+
+# Ignore local azure SDK stubs created for testing
+/azure/
+
+# Ignore one-shot runners and local test scripts
+run_once.py
+run_auth.py
+
+# Python tooling
+.mypy_cache/
+.pytest_cache/
+
+# Ignore market data cache folder (local cache)
+market_data_cache/
+
+# Ignore log and binary cache files
+*.log
+*.bin
+

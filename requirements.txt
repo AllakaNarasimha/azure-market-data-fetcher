@@ -1,0 +1,12 @@
+azure-functions
+azure-storage-blob
+azure-identity
+azure-keyvault-secrets
+pytz
+pandas
+pyarrow
+requests
+pyotp
+dhanhq
+fyers-apiv3
+

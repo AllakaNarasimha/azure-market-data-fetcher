@@ -1,0 +1,13 @@
+.venv/
+local_data/
+local.settings.json
+app.zip
+app_clean.zip
+run_auth.py
+run_once.py
+.azure-personal/
+*.parquet
+.vscode/
+__pycache__/
+*.pyc
+*.log

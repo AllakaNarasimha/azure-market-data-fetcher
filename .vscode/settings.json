@@ -1,0 +1,5 @@
+{
+    "terminal.integrated.env.windows": {
+        "AZURE_CONFIG_DIR": "D:\\NS\\test_repo\\.azure-personal"
+    }
+}
