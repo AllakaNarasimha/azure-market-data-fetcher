@@ -14,3 +14,8 @@ step1: python -m venv .venv
 step2: .\.venv\Scripts\Activate
 step3: pip install -r requirements.txt
 step4: func start
+
+
+
+setup githug
+git remote set-url origin https://github.com/AllakaNarasimha/azure-market-data-fetcher.git

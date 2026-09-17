@@ -12,6 +12,19 @@ import broker_data_manager as bdm
 from parquet_cache_manager import ParquetCacheManager
 from market_data_cache import OptionChainCacheManager
 
+# When running the module directly (not in Azure), load local.settings.json
+# into environment variables so values like TEST_MODE are available.
+try:
+    if os.getenv("WEBSITE_INSTANCE_ID") is None and os.path.exists("local.settings.json"):
+        with open("local.settings.json", "r") as _f:
+            _cfg = json.load(_f)
+            for _k, _v in _cfg.get("Values", {}).items():
+                if os.getenv(_k) is None:
+                    os.environ[_k] = str(_v)
+        logging.info("Loaded local.settings.json into environment for local run")
+except Exception:
+    logging.exception("Failed to load local.settings.json into environment")
+
 app = func.FunctionApp()
 
 # ---------------------------------------------------------
@@ -304,8 +317,12 @@ def daily_job(dailyTimer: func.TimerRequest) -> None:
 
 
 # If TEST_MODE is enabled in environment, run both schedulers once on import/startup.
-# This is useful for local testing: set TEST_MODE=true in `local.settings.json` or env.
-if os.getenv("TEST_MODE", "false").strip().lower() == "true":
+# Note: `local.settings.json` is only used locally. In Azure, set `TEST_MODE` under
+# Application settings for the Function App (Portal or `az functionapp config appsettings set`).
+_test_mode_val = os.getenv("TEST_MODE")
+_website_id = os.getenv("WEBSITE_INSTANCE_ID")
+logging.info(f"Startup env: TEST_MODE={_test_mode_val!r}, WEBSITE_INSTANCE_ID={_website_id!r}")
+if str(_test_mode_val or "").strip().lower() == "true":
     logging.info("TEST_MODE=true: running one-off market_data_fetcher and daily_job")
     try:
         LiveScheduler().run()
