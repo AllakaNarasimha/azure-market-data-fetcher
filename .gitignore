@@ -26,3 +26,4 @@ market_data_cache/
 *.log
 *.bin
 
+.python_packages/
