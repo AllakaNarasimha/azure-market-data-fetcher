@@ -10,6 +10,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from parquet_cache_manager import BlobSync, _local_cache_root
+
 # =====================================================================
 # DESIGN NOTES
 #
@@ -58,8 +60,9 @@ class QuoteCacheManager:
 
     ENGINE = "pyarrow"
 
-    def __init__(self, cache_dir: Path = Path(__file__).parent / "local_data" / "market_data_cache"):
-        self.cache_dir = Path(cache_dir) / "quotes"
+    def __init__(self, cache_dir: Optional[Path] = None):
+        self.cache_dir = Path(cache_dir or _local_cache_root("market_data_cache")) / "quotes"
+        self._blob_sync = BlobSync()
 
     def _partition_path(self, symbol: str, day: date_cls) -> Path:
         return (
@@ -70,6 +73,9 @@ class QuoteCacheManager:
             / f"day={day.day:02d}"
         )
 
+    def _blob_name(self, symbol: str, day: date_cls) -> str:
+        return f"quotes/symbol={_fs_symbol(symbol)}/year={day.year}/month={day.month:02d}/day={day.day:02d}/part-0.parquet"
+
     def save(self, symbol: str, quote: dict, source: str, fetched_at: Optional[datetime] = None) -> None:
         """Persist one flat quote dict (e.g. Fyers' `v` sub-object) as a snapshot row."""
         fetched_at = fetched_at or datetime.now()
@@ -79,6 +85,8 @@ class QuoteCacheManager:
         partition = self._partition_path(symbol, fetched_at.date())
         partition.mkdir(parents=True, exist_ok=True)
         file_path = partition / "part-0.parquet"
+        blob_name = self._blob_name(symbol, fetched_at.date())
+        self._blob_sync.download_if_missing(str(file_path), blob_name)
 
         if file_path.exists():
             existing = pd.read_parquet(file_path, engine=self.ENGINE)
@@ -86,6 +94,7 @@ class QuoteCacheManager:
             df = df.drop_duplicates(subset=["symbol", "source", "fetched_at"], keep="last")
 
         pq.write_table(pa.Table.from_pandas(df, preserve_index=False), file_path)
+        self._blob_sync.upload(str(file_path), blob_name)
 
     def save_fyers_response(self, response: dict, source: str = "fyers", fetched_at: Optional[datetime] = None) -> int:
         """Flatten and persist every symbol in a Fyers `quotes()` response. Returns rows saved."""
@@ -103,6 +112,7 @@ class QuoteCacheManager:
 
     def load(self, symbol: str, day: date_cls) -> pd.DataFrame:
         file_path = self._partition_path(symbol, day) / "part-0.parquet"
+        self._blob_sync.download_if_missing(str(file_path), self._blob_name(symbol, day))
         if not file_path.exists():
             return pd.DataFrame()
         return pd.read_parquet(file_path, engine=self.ENGINE)
@@ -119,8 +129,9 @@ class OptionChainCacheManager:
 
     ENGINE = "pyarrow"
 
-    def __init__(self, cache_dir: Path = Path(__file__).parent / "local_data" / "market_data_cache"):
-        self.cache_dir = Path(cache_dir) / "option_chain"
+    def __init__(self, cache_dir: Optional[Path] = None):
+        self.cache_dir = Path(cache_dir or _local_cache_root("market_data_cache")) / "option_chain"
+        self._blob_sync = BlobSync()
 
     def _partition_path(self, underlying: str, day: date_cls) -> Path:
         return (
@@ -133,6 +144,12 @@ class OptionChainCacheManager:
 
     def _expiry_path(self, underlying: str) -> Path:
         return self.cache_dir / f"underlying={_fs_symbol(underlying)}" / "expiries.parquet"
+
+    def _blob_name(self, underlying: str, day: date_cls) -> str:
+        return f"option_chain/underlying={_fs_symbol(underlying)}/year={day.year}/month={day.month:02d}/day={day.day:02d}/part-0.parquet"
+
+    def _expiry_blob_name(self, underlying: str) -> str:
+        return f"option_chain/underlying={_fs_symbol(underlying)}/expiries.parquet"
 
     def save_fyers_response(
         self,
@@ -158,6 +175,8 @@ class OptionChainCacheManager:
         partition = self._partition_path(underlying, fetched_at.date())
         partition.mkdir(parents=True, exist_ok=True)
         file_path = partition / "part-0.parquet"
+        blob_name = self._blob_name(underlying, fetched_at.date())
+        self._blob_sync.download_if_missing(str(file_path), blob_name)
 
         if file_path.exists():
             existing = pd.read_parquet(file_path, engine=self.ENGINE)
@@ -167,25 +186,30 @@ class OptionChainCacheManager:
             )
 
         pq.write_table(pa.Table.from_pandas(df, preserve_index=False), file_path)
+        self._blob_sync.upload(str(file_path), blob_name)
 
         expiry_data = data.get("expiryData", [])
         if expiry_data:
-            self._expiry_path(underlying).parent.mkdir(parents=True, exist_ok=True)
+            expiry_path = self._expiry_path(underlying)
+            expiry_path.parent.mkdir(parents=True, exist_ok=True)
             pq.write_table(
                 pa.Table.from_pandas(pd.DataFrame(expiry_data), preserve_index=False),
-                self._expiry_path(underlying),
+                expiry_path,
             )
+            self._blob_sync.upload(str(expiry_path), self._expiry_blob_name(underlying))
 
         return len(df)
 
     def load(self, underlying: str, day: date_cls) -> pd.DataFrame:
         file_path = self._partition_path(underlying, day) / "part-0.parquet"
+        self._blob_sync.download_if_missing(str(file_path), self._blob_name(underlying, day))
         if not file_path.exists():
             return pd.DataFrame()
         return pd.read_parquet(file_path, engine=self.ENGINE)
 
     def load_expiries(self, underlying: str) -> pd.DataFrame:
         file_path = self._expiry_path(underlying)
+        self._blob_sync.download_if_missing(str(file_path), self._expiry_blob_name(underlying))
         if not file_path.exists():
             return pd.DataFrame()
         return pd.read_parquet(file_path, engine=self.ENGINE)

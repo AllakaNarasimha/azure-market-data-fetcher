@@ -1,15 +1,79 @@
 import os
 import logging
+import tempfile
 import urllib.parse
 from datetime import datetime, time, timedelta
+from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
+from azure.core.exceptions import ResourceExistsError
+from azure.storage.blob import BlobServiceClient
+
+from broker_authenticate import is_running_locally
 
 logger = logging.getLogger(__name__)
+
+
+class BlobSync:
+    """Syncs local parquet cache files with Blob Storage.
+
+    Azure's deployed filesystem is read-only (and /tmp is ephemeral), so cached
+    candles/quotes/option chains would otherwise be re-fetched on every cold
+    start. Reuses MARKET_STORAGE_CONNECTION (already used for broker tokens/
+    master files). No-op locally or when that connection string isn't set.
+    """
+
+    CONTAINER = "market-data-cache"
+
+    def __init__(self):
+        self.enabled = not is_running_locally()
+        self._container_client = None
+        if self.enabled:
+            conn_str = os.getenv("MARKET_STORAGE_CONNECTION")
+            if conn_str:
+                blob_service = BlobServiceClient.from_connection_string(conn_str)
+                self._container_client = blob_service.get_container_client(self.CONTAINER)
+                try:
+                    self._container_client.create_container()
+                except ResourceExistsError:
+                    pass
+                except Exception:
+                    logger.exception("Failed to create blob container '%s'", self.CONTAINER)
+            else:
+                self.enabled = False
+
+    def download_if_missing(self, local_path: str, blob_name: str) -> None:
+        if not self.enabled or os.path.exists(local_path):
+            return
+        try:
+            blob = self._container_client.get_blob_client(blob_name)
+            if blob.exists():
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                with open(local_path, "wb") as f:
+                    f.write(blob.download_blob().readall())
+        except Exception:
+            logger.exception("[BLOB SYNC] Failed to download %s", blob_name)
+
+    def upload(self, local_path: str, blob_name: str) -> None:
+        if not self.enabled:
+            return
+        try:
+            blob = self._container_client.get_blob_client(blob_name)
+            with open(local_path, "rb") as f:
+                blob.upload_blob(f.read(), overwrite=True)
+        except Exception:
+            logger.exception("[BLOB SYNC] Failed to upload %s", blob_name)
+
+
+def _local_cache_root(subdir: str) -> str:
+    """Repo-relative locally; writable temp dir in Azure (synced via BlobSync)."""
+    if is_running_locally():
+        return subdir
+    return str(Path(tempfile.gettempdir()) / subdir)
 
 
 # =====================================================================
@@ -110,6 +174,8 @@ class TimestampUtils:
 class CacheRegistry:
     """Persistent registry for known market-off periods and known data/API problems."""
 
+    BLOB_NAME = f"registry/{CacheConstants.REGISTRY_FILENAME}"
+
     def __init__(self, cache_dir: str):
         self.registry_path = os.path.abspath(
             os.path.join(cache_dir, CacheConstants.REGISTRY_FILENAME)
@@ -118,8 +184,10 @@ class CacheRegistry:
             os.path.dirname(self.registry_path),
             exist_ok=True,
         )
+        self._blob_sync = BlobSync()
 
     def load(self) -> pd.DataFrame:
+        self._blob_sync.download_if_missing(self.registry_path, self.BLOB_NAME)
         if (
             os.path.exists(self.registry_path)
             and os.path.getsize(self.registry_path) > 0
@@ -166,6 +234,7 @@ class CacheRegistry:
                 engine=CacheConstants.ENGINE,
                 index=False,
             )
+            self._blob_sync.upload(self.registry_path, self.BLOB_NAME)
 
             logger.info("[REGISTRY] %s | %s | %s → %s | %s", symbol, interval, start_dt, end_dt, reason)
         except Exception as exc:
@@ -350,15 +419,16 @@ class ParquetCacheManager:
 
     def __init__(
         self,
-        cache_dir: str = CacheConstants.CACHE_DIR,
+        cache_dir: Optional[str] = None,
         market_session: Optional[MarketSession] = None,
     ):
-        self.cache_dir = os.path.abspath(cache_dir)
+        self.cache_dir = os.path.abspath(cache_dir or _local_cache_root(CacheConstants.CACHE_DIR))
         os.makedirs(self.cache_dir, exist_ok=True)
 
         self.registry = CacheRegistry(self.cache_dir)
         self.market_session = market_session or MarketSession()
         self.gap_detector = CacheGapDetector(self.market_session)
+        self._blob_sync = BlobSync()
 
     @staticmethod
     def _fs_symbol(symbol: str) -> str:
@@ -768,6 +838,9 @@ class ParquetCacheManager:
             f"month={month}",
         )
 
+    def _blob_name(self, symbol: str, interval: str, year: int, month: int) -> str:
+        return f"candles/symbol={self._fs_symbol(symbol)}/interval={interval}/year={year}/month={month}/part-0.parquet"
+
     def _write_partitions(self, symbol: str, interval: str, df: pd.DataFrame) -> None:
         """Write each (year, month) group directly to its partition path.
 
@@ -780,7 +853,9 @@ class ParquetCacheManager:
             os.makedirs(partition_path, exist_ok=True)
             write_df = group.drop(columns=["symbol", "interval", "year", "month"], errors="ignore")
             table = pa.Table.from_pandas(write_df, preserve_index=False)
-            pq.write_table(table, os.path.join(partition_path, "part-0.parquet"))
+            file_path = os.path.join(partition_path, "part-0.parquet")
+            pq.write_table(table, file_path)
+            self._blob_sync.upload(file_path, self._blob_name(symbol, interval, int(year), int(month)))
 
     def _load_partition(
         self,
@@ -790,6 +865,8 @@ class ParquetCacheManager:
         month: int,
     ) -> pd.DataFrame:
         partition_path = self._partition_path(symbol, interval, year, month)
+        file_path = os.path.join(partition_path, "part-0.parquet")
+        self._blob_sync.download_if_missing(file_path, self._blob_name(symbol, interval, year, month))
 
         if not os.path.exists(partition_path):
             return pd.DataFrame()
