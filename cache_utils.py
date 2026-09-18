@@ -10,9 +10,6 @@ import tempfile
 TEST_CACHE_DIRNAME = "test_mode_data"
 MARKET_CACHE_DIRNAME = "market_data_cache"
 
-# Azure Blob container names allow only lowercase letters, numbers, and hyphens.
-TEST_CONTAINER_NAME = TEST_CACHE_DIRNAME.replace("_", "-")
-
 
 def is_test_cache_path(local_path: str) -> bool:
     """True if `local_path` lives under the test-mode cache folder."""

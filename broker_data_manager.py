@@ -11,10 +11,9 @@ from typing import Optional
 
 import pandas as pd
 import requests
-from azure.core.exceptions import ResourceExistsError
-from azure.storage.blob import BlobServiceClient
 
 from broker_authenticate import BrokerAuth, is_running_locally
+from blob_utils import BlobUtils
 
 logger = logging.getLogger(__name__)
 
@@ -27,23 +26,14 @@ class MasterFileCache:
     the same is_local pattern as TokenCache.
     """
 
-    CONTAINER = "broker-master"
+    CONTAINER = BlobUtils.BROKER_DATA_BLOB
 
     def __init__(self, local_dir: Path):
         self.is_local = is_running_locally()
         self.local_dir = local_dir
         self._container_client = None
         if not self.is_local:
-            conn_str = os.getenv("MARKET_STORAGE_CONNECTION")
-            if conn_str:
-                blob_service = BlobServiceClient.from_connection_string(conn_str)
-                self._container_client = blob_service.get_container_client(self.CONTAINER)
-                try:
-                    self._container_client.create_container()
-                except ResourceExistsError:
-                    pass
-                except Exception:
-                    logger.exception("Failed to create blob container '%s'", self.CONTAINER)
+            self._container_client = BlobUtils.get_container_client(self.CONTAINER)
 
     def get(self, filename: str, download_url: str) -> bytes:
         if self.is_local:

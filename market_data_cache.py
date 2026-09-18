@@ -10,7 +10,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from parquet_cache_manager import BlobSync, _local_cache_root
+from blob_utils import BlobSync
+from parquet_cache_manager import _local_cache_root
 
 # =====================================================================
 # DESIGN NOTES

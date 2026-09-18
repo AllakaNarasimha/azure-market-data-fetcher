@@ -13,24 +13,14 @@ from urllib.parse import parse_qs, urlparse
 
 import pyotp
 import requests
-from azure.core.exceptions import ResourceExistsError
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
-from azure.storage.blob import BlobServiceClient
 from dhanhq import DhanContext, DhanLogin, dhanhq
 from fyers_apiv3 import fyersModel
 
+from blob_utils import BlobUtils, is_running_locally
+
 logger = logging.getLogger(__name__)
-
-
-def is_running_locally() -> bool:
-    """True when NOT running inside a deployed Azure Function App.
-
-    WEBSITE_INSTANCE_ID isn't reliably forwarded to the Python worker process
-    on Linux Consumption, so use WEBSITE_SITE_NAME instead - it's always set
-    by the App Service platform for any deployed Web/Function App.
-    """
-    return os.getenv("WEBSITE_SITE_NAME") is None
 
 
 class ConfigStore:
@@ -93,23 +83,13 @@ class ConfigStore:
 
 
 class TokenCache:
-    CONTAINER = "broker-tokens"
     LOCAL_DIR = Path(__file__).parent / "local_data" / "broker_tokens"
 
     def __init__(self):
         self.is_local = is_running_locally()
         self._container_client = None
         if not self.is_local:
-            conn_str = os.getenv("MARKET_STORAGE_CONNECTION")
-            if conn_str:
-                blob_service = BlobServiceClient.from_connection_string(conn_str)
-                self._container_client = blob_service.get_container_client(self.CONTAINER)
-                try:
-                    self._container_client.create_container()
-                except ResourceExistsError:
-                    pass
-                except Exception:
-                    logger.exception("Failed to create blob container '%s'", self.CONTAINER)
+            self._container_client = BlobUtils.get_container_client(BlobUtils.BROKER_TOKEN_BLOB)
 
     def load(self, broker: str) -> Optional[dict]:
         try:
