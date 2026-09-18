@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 import pytz
 from typing import Callable, Optional, Tuple
+from pathlib import Path
 import tempfile
 
 
@@ -26,10 +27,21 @@ def should_use_test_cache(test_mode: bool, now: Optional[datetime] = None, is_ho
 
     use_test_cache = test_mode and (market_closed or market_holiday)
     if use_test_cache:
-        # Default test cache path under project-local data for local runs
-        test_cache_root = os.path.join("local_data", "test_mode_data", "market_data_cache")
-        # When running on Azure (not local), use a writable temp directory to avoid PermissionError
-        if not is_local:
-            test_cache_root = os.path.join(tempfile.gettempdir(), "test_mode_data", "market_data_cache")
+        # Place the test_mode_data folder as a sibling to the canonical
+        # `market_data_cache` root. This yields e.g. `test_mode_data/market_data_cache`
+        # alongside the existing `market_data_cache` directory instead of nested inside it.
+        # Determine the canonical market cache root's parent. Prefer a repo-relative
+        # `market_data_cache` sibling layout so test artifacts appear alongside the
+        # production cache folder instead of nested under it.
+        canonical = Path("market_data_cache")
+        parent = canonical.parent if canonical.parent != Path("") else Path(".")
+
+        if is_local:
+            test_cache_root = str(parent / "test_mode_data" / "market_data_cache")
+        else:
+            # Use a writable temp dir on non-local hosts but keep the same
+            # sibling structure semantics under the temp dir.
+            test_cache_root = str(Path(tempfile.gettempdir()) / "test_mode_data" / "market_data_cache")
+
         return True, test_cache_root
     return False, None
