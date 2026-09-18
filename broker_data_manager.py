@@ -365,6 +365,7 @@ class IDataManager:
         strikecount: int = 1,
         weekly_expiry_count: Optional[int] = None,
         monthly_expiry_count: Optional[int] = None,
+        expiries: Optional[list[dict]] = None,
     ) -> dict:
         raise NotImplementedError()
 
@@ -424,11 +425,13 @@ class DhanDataManager(IDataManager):
         strikecount: int = 1,
         weekly_expiry_count: Optional[int] = None,
         monthly_expiry_count: Optional[int] = None,
+        expiries: Optional[list[dict]] = None,
     ) -> dict:
         sec_id = self._security_id(instrument)
         expiry = ""
         if weekly_expiry_count is not None or monthly_expiry_count is not None:
-            expiries = ExpiryResolver.classify_dates(self.get_expiry_dates(instrument))
+            if expiries is None:
+                expiries = ExpiryResolver.classify_dates(self.get_expiry_dates(instrument))
             expiry = ExpiryResolver.resolve(expiries, weekly_expiry_count, monthly_expiry_count)
         return self._get_client().option_chain(
             under_security_id=sec_id, under_exchange_segment="NSE_FNO", expiry=expiry
@@ -479,10 +482,13 @@ class FyersDataManager(IDataManager):
         strikecount: int = 1,
         weekly_expiry_count: Optional[int] = None,
         monthly_expiry_count: Optional[int] = None,
+        expiries: Optional[list[dict]] = None,
     ) -> dict:
         timestamp = ""
         if weekly_expiry_count is not None or monthly_expiry_count is not None:
-            timestamp = ExpiryResolver.resolve(self.get_expiries(instrument), weekly_expiry_count, monthly_expiry_count)
+            if expiries is None:
+                expiries = self.get_expiries(instrument)
+            timestamp = ExpiryResolver.resolve(expiries, weekly_expiry_count, monthly_expiry_count)
         return self._get_client().optionchain(
             {"symbol": instrument.symbol, "strikecount": strikecount, "timestamp": timestamp}
         )

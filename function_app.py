@@ -142,7 +142,9 @@ class LiveScheduler:
                 logging.info(f"[LiveScheduler] {instrument.symbol} ({broker_name}) only {week} weekly expiries available")
                 break
             try:
-                chain = manager.get_option_chain(instrument, strikecount=self.strikecount, weekly_expiry_count=week)
+                chain = manager.get_option_chain(
+                    instrument, strikecount=self.strikecount, weekly_expiry_count=week, expiries=expiries
+                )
                 rows = chain_cache.save_fyers_response(
                     instrument.symbol, chain, source=broker_name, expiry_timestamp=expiry_ts
                 )
@@ -159,7 +161,9 @@ class LiveScheduler:
                 logging.info(f"[LiveScheduler] {instrument.symbol} ({broker_name}) only {month} monthly expiries available")
                 break
             try:
-                chain = manager.get_option_chain(instrument, strikecount=self.strikecount, monthly_expiry_count=month)
+                chain = manager.get_option_chain(
+                    instrument, strikecount=self.strikecount, monthly_expiry_count=month, expiries=expiries
+                )
                 rows = chain_cache.save_fyers_response(
                     instrument.symbol, chain, source=broker_name, expiry_timestamp=expiry_ts
                 )
