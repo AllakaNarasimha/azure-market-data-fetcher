@@ -157,8 +157,17 @@ class BrokerConfig:
 
     def __init__(self):
         data = ConfigStore().load(self.ENV_VAR)
+        mapping = getattr(self, "MAPPING", {})
         for field, default in self.FIELDS.items():
-            setattr(self, field, data.get(field, default))
+            # Primary source: value inside the JSON config (data)
+            value = data.get(field, default)
+            # If absent/empty and a mapping exists, try the mapped env var
+            if (value is None or value == "") and field in mapping:
+                mapped_env = mapping[field]
+                env_val = os.getenv(mapped_env)
+                if env_val is not None:
+                    value = env_val
+            setattr(self, field, value)
 
 
 class DhanConfig(BrokerConfig):
@@ -180,6 +189,10 @@ class FyersConfig(BrokerConfig):
         "totp_secret": None,
         "app_secret": None,
         "callback_url": "http://localhost:8000",
+    }
+    # Map logical field names to alternate environment variables or secrets.
+    MAPPING = {
+        "pin": "FYERS_PIN",
     }
 
 class DhanTOTPAuthenticator:
