@@ -8,13 +8,14 @@ from pandas.tseries.offsets import CustomBusinessDay
 import azure.functions as func
 
 import broker_data_manager as bdm
+from broker_authenticate import is_running_locally
 from parquet_cache_manager import ParquetCacheManager
 from market_data_cache import OptionChainCacheManager
 
 # When running the module directly (not in Azure), load local.settings.json
 # into environment variables so values like TEST_MODE are available.
 try:
-    if os.getenv("WEBSITE_INSTANCE_ID") is None and os.path.exists("local.settings.json"):
+    if is_running_locally() and os.path.exists("local.settings.json"):
         with open("local.settings.json", "r") as _f:
             _cfg = json.load(_f)
             for _k, _v in _cfg.get("Values", {}).items():
@@ -86,7 +87,7 @@ class LiveScheduler:
         self.months = months
 
     def run(self) -> None:
-        is_local = os.getenv("WEBSITE_INSTANCE_ID") is None
+        is_local = is_running_locally()
         test_mode = os.getenv("TEST_MODE", "false").strip().lower() == "true"
 
         ist_tz = pytz.timezone('Asia/Kolkata')
@@ -176,7 +177,7 @@ class DailyScheduler:
         self.history_days = history_days
 
     def run(self) -> None:
-        is_local = os.getenv("WEBSITE_INSTANCE_ID") is None
+        is_local = is_running_locally()
         logging.info(f"=== Daily Job Started (Local Mode: {is_local}) ===")
 
         if MarketCalendar.is_holiday(datetime.now()):
@@ -255,7 +256,7 @@ class DailyScheduler:
 # functions, and synchronous broker/network calls during that phase crash
 # the host with "Value cannot be null. (Parameter 'provider')".
 _test_mode = os.getenv("TEST_MODE", "false").strip().lower() == "true"
-logging.info(f"Startup env: TEST_MODE={os.getenv('TEST_MODE')!r}, WEBSITE_INSTANCE_ID={os.getenv('WEBSITE_INSTANCE_ID')!r}")
+logging.info(f"Startup env: TEST_MODE={os.getenv('TEST_MODE')!r}, WEBSITE_SITE_NAME={os.getenv('WEBSITE_SITE_NAME')!r}")
 
 @app.timer_trigger(schedule="0 * * * * 1-5", arg_name="mytimer", run_on_startup=_test_mode, use_monitor=False)
 def market_data_fetcher(mytimer: func.TimerRequest) -> None:

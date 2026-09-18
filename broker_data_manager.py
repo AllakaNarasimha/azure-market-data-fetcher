@@ -14,7 +14,7 @@ import requests
 from azure.core.exceptions import ResourceExistsError
 from azure.storage.blob import BlobServiceClient
 
-from broker_authenticate import BrokerAuth
+from broker_authenticate import BrokerAuth, is_running_locally
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class MasterFileCache:
     CONTAINER = "broker-master"
 
     def __init__(self, local_dir: Path):
-        self.is_local = os.getenv("WEBSITE_INSTANCE_ID") is None
+        self.is_local = is_running_locally()
         self.local_dir = local_dir
         self._container_client = None
         if not self.is_local:

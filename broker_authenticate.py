@@ -22,11 +22,21 @@ from fyers_apiv3 import fyersModel
 logger = logging.getLogger(__name__)
 
 
+def is_running_locally() -> bool:
+    """True when NOT running inside a deployed Azure Function App.
+
+    WEBSITE_INSTANCE_ID isn't reliably forwarded to the Python worker process
+    on Linux Consumption, so use WEBSITE_SITE_NAME instead - it's always set
+    by the App Service platform for any deployed Web/Function App.
+    """
+    return os.getenv("WEBSITE_SITE_NAME") is None
+
+
 class ConfigStore:
     LOCAL_SETTINGS_PATH = Path(__file__).parent / "local.settings.json"
 
     def __init__(self):
-        self.is_local = os.getenv("WEBSITE_INSTANCE_ID") is None
+        self.is_local = is_running_locally()
         self.key_vault_url = os.getenv("KEY_VAULT_URL")
         # When running locally, ensure values from local.settings.json are
         # loaded into the process environment so standalone scripts (or
@@ -80,7 +90,7 @@ class TokenCache:
     LOCAL_DIR = Path(__file__).parent / "local_data" / "broker_tokens"
 
     def __init__(self):
-        self.is_local = os.getenv("WEBSITE_INSTANCE_ID") is None
+        self.is_local = is_running_locally()
         self._container_client = None
         if not self.is_local:
             conn_str = os.getenv("MARKET_STORAGE_CONNECTION")
@@ -387,7 +397,7 @@ class BrokerAuth:
 
 def main() -> None:
     handlers: list[logging.Handler] = [logging.StreamHandler()]
-    if os.getenv("WEBSITE_INSTANCE_ID") is None:
+    if is_running_locally():
         handlers.append(logging.FileHandler(Path(__file__).parent / "authenticate.log", encoding="utf-8"))
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", handlers=handlers)
 
