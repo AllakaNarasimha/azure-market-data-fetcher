@@ -7,14 +7,7 @@ from typing import Callable, Optional, Tuple
 from pathlib import Path
 import tempfile
 
-# Name of the folder used for test-mode cache writes. Kept as a single source
-# of truth so BlobSync (parquet_cache_manager.py) can detect test-mode local
-# paths using the exact same folder name instead of a duplicated literal.
 TEST_CACHE_DIRNAME = "test_mode_data"
-
-# Name of the canonical market data cache folder, shared with BlobSync so the
-# test-mode blob prefix mirrors the local test_mode_data/market_data_cache
-# folder order instead of duplicating the literal.
 MARKET_CACHE_DIRNAME = "market_data_cache"
 
 
@@ -51,7 +44,7 @@ def should_use_test_cache(test_mode: bool, now: Optional[datetime] = None, is_ho
     now = now or datetime.now(tz)
 
     market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    market_close = now.replace(hour=16, minute=00, second=0, microsecond=0)
 
     market_closed = not (market_open <= now <= market_close)
     market_holiday = is_holiday(now) if is_holiday is not None else False
