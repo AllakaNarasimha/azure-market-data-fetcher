@@ -55,7 +55,13 @@ class ConfigStore:
         raw = os.getenv(env_var)
         if not raw:
             raise RuntimeError(f"{env_var} is not configured")
-        return json.loads(raw)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            # Tolerate an accidentally double-escaped App Setting value (e.g.
+            # '{\"key\":\"value\"}' pasted verbatim from local.settings.json)
+            # by unescaping once and retrying before giving up.
+            return json.loads(raw.replace('\\"', '"'))
 
     def update_value(self, env_var: str, key: str, value: str) -> None:
         try:

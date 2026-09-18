@@ -8,7 +8,6 @@ from typing import List, Dict, Tuple, Optional
 
 import pandas as pd
 import pyarrow as pa
-import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 from azure.core.exceptions import ResourceExistsError
 from azure.storage.blob import BlobServiceClient
