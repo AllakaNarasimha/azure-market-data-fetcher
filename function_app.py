@@ -97,7 +97,8 @@ class LiveScheduler:
         market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
         market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
 
-        use_test_cache, test_cache_root = should_use_test_cache(test_mode, now=now, is_holiday=MarketCalendar.is_holiday)
+        use_test_cache, test_cache_root = should_use_test_cache(test_mode, now=now, is_holiday=MarketCalendar.is_holiday, is_local=is_local)
+
         if not use_test_cache and not (test_mode or (market_open <= now <= market_close) and not MarketCalendar.is_holiday(now)):
             # If not in test-mode and market is closed/holiday, skip.
             # The above condition preserves prior behavior when test_mode is False.
@@ -202,7 +203,8 @@ class DailyScheduler:
         market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
         market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
 
-        use_test_cache, test_cache_root = should_use_test_cache(test_mode, now=now, is_holiday=MarketCalendar.is_holiday)
+        use_test_cache, test_cache_root = should_use_test_cache(test_mode, now=now, is_holiday=MarketCalendar.is_holiday, is_local=is_local)
+
         if not use_test_cache and not (test_mode or (market_open <= now <= market_close) and not MarketCalendar.is_holiday(now)):
             logging.info("Market is closed or holiday. Skipping daily job.")
             return
