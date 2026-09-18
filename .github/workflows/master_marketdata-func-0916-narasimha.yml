@@ -35,7 +35,16 @@ jobs:
         run: |
           pushd './${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}'
           python -m pip install --upgrade pip
-          pip install -r requirements.txt --target=".python_packages/lib/site-packages"
+          # Force manylinux2014 (glibc 2.17+) wheels so compiled deps (cryptography, pyarrow, ...)
+          # match the older glibc in the Azure Functions Python Linux runtime, instead of picking up
+          # newer manylinux wheels built for ubuntu-latest's glibc that fail to import in Azure.
+          pip install \
+            --platform manylinux2014_x86_64 \
+            --implementation cp \
+            --python-version ${{ env.PYTHON_VERSION }} \
+            --only-binary=:all: \
+            --target=".python_packages/lib/site-packages" \
+            -r requirements.txt
           popd
 
       # Optional: Add step to run tests here
