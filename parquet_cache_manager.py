@@ -49,6 +49,11 @@ class BlobSync:
         if not self.enabled or os.path.exists(local_path):
             return
         try:
+            # When running in TEST_MODE and the local path is the test-mode
+            # cache, download/upload operations should target a test-specific
+            # blob prefix to avoid clobbering production data.
+            if os.getenv("TEST_MODE", "").strip().lower() == "true" and "test_mode_data" in str(local_path):
+                blob_name = f"test_mode/{blob_name}"
             blob = self._container_client.get_blob_client(blob_name)
             if blob.exists():
                 os.makedirs(os.path.dirname(local_path), exist_ok=True)
@@ -61,6 +66,11 @@ class BlobSync:
         if not self.enabled:
             return
         try:
+            # When running in TEST_MODE and writing from the test-mode cache,
+            # upload to a test-specific blob prefix so production blobs are
+            # not overwritten by test artifacts.
+            if os.getenv("TEST_MODE", "").strip().lower() == "true" and "test_mode_data" in str(local_path):
+                blob_name = f"test_mode/{blob_name}"
             blob = self._container_client.get_blob_client(blob_name)
             with open(local_path, "rb") as f:
                 blob.upload_blob(f.read(), overwrite=True)

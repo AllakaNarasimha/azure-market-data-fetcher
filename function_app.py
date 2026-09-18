@@ -11,6 +11,7 @@ import broker_data_manager as bdm
 from broker_authenticate import is_running_locally
 from parquet_cache_manager import ParquetCacheManager
 from market_data_cache import OptionChainCacheManager
+from cache_utils import should_use_test_cache
 
 # When running the module directly (not in Azure), load local.settings.json
 # into environment variables so values like TEST_MODE are available.
@@ -96,17 +97,21 @@ class LiveScheduler:
         market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
         market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
 
-        if not (market_open <= now <= market_close) and not test_mode:
-            logging.info("Market is closed. Skipping.")
-            return
-        if MarketCalendar.is_holiday(now) and not test_mode:
-            logging.info("Market holiday. Skipping.")
+        use_test_cache, test_cache_root = should_use_test_cache(test_mode, now=now, is_holiday=MarketCalendar.is_holiday)
+        if not use_test_cache and not (test_mode or (market_open <= now <= market_close) and not MarketCalendar.is_holiday(now)):
+            # If not in test-mode and market is closed/holiday, skip.
+            # The above condition preserves prior behavior when test_mode is False.
+            logging.info("Market is closed or holiday. Skipping.")
             return
 
         logging.info(f"=== Fetching Option Chains (Local Mode: {is_local}) ===")
 
         option_chain_symbols = [s.strip() for s in os.getenv("OPTION_CHAIN_SYMBOLS", "").split(",") if s.strip()]
-        chain_cache = OptionChainCacheManager()
+        if use_test_cache:
+            chain_cache = OptionChainCacheManager(cache_dir=test_cache_root)
+            logging.info(f"TEST_MODE after-hours: writing cache to %s", test_cache_root)
+        else:
+            chain_cache = OptionChainCacheManager()
 
         for symbol in option_chain_symbols:
             try:
@@ -190,16 +195,27 @@ class DailyScheduler:
 
     def run(self) -> None:
         is_local = is_running_locally()
-        logging.info(f"=== Daily Job Started (Local Mode: {is_local}) ===")
+        test_mode = os.getenv("TEST_MODE", "false").strip().lower() == "true"
+        ist_tz = pytz.timezone('Asia/Kolkata')
+        now = datetime.now(ist_tz)
 
-        if MarketCalendar.is_holiday(datetime.now()):
-            logging.info("Market holiday. Skipping daily job.")
+        market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+
+        use_test_cache, test_cache_root = should_use_test_cache(test_mode, now=now, is_holiday=MarketCalendar.is_holiday)
+        if not use_test_cache and not (test_mode or (market_open <= now <= market_close) and not MarketCalendar.is_holiday(now)):
+            logging.info("Market is closed or holiday. Skipping daily job.")
             return
 
         symbols = [s.strip() for s in os.getenv("WATCHLIST_SYMBOLS", "SBIN").split(",") if s.strip()]
         option_chain_symbols = [s.strip() for s in os.getenv("OPTION_CHAIN_SYMBOLS", "").split(",") if s.strip()]
-        candle_cache = ParquetCacheManager()
-        chain_cache = OptionChainCacheManager()
+        if use_test_cache:
+            candle_cache = ParquetCacheManager(cache_dir=test_cache_root)
+            chain_cache = OptionChainCacheManager(cache_dir=test_cache_root)
+            logging.info(f"TEST_MODE after-hours: writing daily cache to %s", test_cache_root)
+        else:
+            candle_cache = ParquetCacheManager()
+            chain_cache = OptionChainCacheManager()
         end_date = datetime.now()
         start_date = MarketCalendar.get_trading_days_back(end_date, days_back=self.history_days).to_pydatetime()
 
