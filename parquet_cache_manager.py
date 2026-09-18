@@ -13,6 +13,7 @@ from azure.core.exceptions import ResourceExistsError
 from azure.storage.blob import BlobServiceClient
 
 from broker_authenticate import is_running_locally
+from cache_utils import is_test_cache_path, TEST_CACHE_DIRNAME
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +53,10 @@ class BlobSync:
             # When running in TEST_MODE and the local path is the test-mode
             # cache, download/upload operations should target a test-specific
             # blob prefix to avoid clobbering production data.
-            if os.getenv("TEST_MODE", "").strip().lower() == "true" and "test_mode_data" in str(local_path):
-                blob_name = f"test_mode/{blob_name}"
+            if os.getenv("TEST_MODE", "").strip().lower() == "true" and is_test_cache_path(local_path):
+                old_blob = blob_name
+                blob_name = f"{TEST_CACHE_DIRNAME}/{blob_name}"
+                logger.info("[BLOB SYNC] TEST_MODE detected; mapping %s -> %s for local path %s", old_blob, blob_name, local_path)
             blob = self._container_client.get_blob_client(blob_name)
             if blob.exists():
                 os.makedirs(os.path.dirname(local_path), exist_ok=True)
@@ -69,8 +72,10 @@ class BlobSync:
             # When running in TEST_MODE and writing from the test-mode cache,
             # upload to a test-specific blob prefix so production blobs are
             # not overwritten by test artifacts.
-            if os.getenv("TEST_MODE", "").strip().lower() == "true" and "test_mode_data" in str(local_path):
-                blob_name = f"test_mode/{blob_name}"
+            if os.getenv("TEST_MODE", "").strip().lower() == "true" and is_test_cache_path(local_path):
+                old_blob = blob_name
+                blob_name = f"{TEST_CACHE_DIRNAME}/{blob_name}"
+                logger.info("[BLOB SYNC] TEST_MODE detected; mapping %s -> %s for local path %s", old_blob, blob_name, local_path)
             blob = self._container_client.get_blob_client(blob_name)
             with open(local_path, "rb") as f:
                 blob.upload_blob(f.read(), overwrite=True)

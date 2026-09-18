@@ -7,6 +7,16 @@ from typing import Callable, Optional, Tuple
 from pathlib import Path
 import tempfile
 
+# Name of the folder used for test-mode cache writes. Kept as a single source
+# of truth so BlobSync (parquet_cache_manager.py) can detect test-mode local
+# paths using the exact same folder name instead of a duplicated literal.
+TEST_CACHE_DIRNAME = "test_mode_data"
+
+
+def is_test_cache_path(local_path: str) -> bool:
+    """True if `local_path` lives under the test-mode cache folder."""
+    return TEST_CACHE_DIRNAME in str(local_path).replace("\\", "/").lower()
+
 
 def should_use_test_cache(test_mode: bool, now: Optional[datetime] = None, is_holiday: Optional[Callable[[datetime], bool]] = None, is_local: bool = True) -> Tuple[bool, Optional[str]]:
     """Decide whether to route writes to the test-mode cache.
@@ -37,11 +47,11 @@ def should_use_test_cache(test_mode: bool, now: Optional[datetime] = None, is_ho
         parent = canonical.parent if canonical.parent != Path("") else Path(".")
 
         if is_local:
-            test_cache_root = str(parent / "test_mode_data" / "market_data_cache")
+            test_cache_root = str(parent / TEST_CACHE_DIRNAME / "market_data_cache")
         else:
             # Use a writable temp dir on non-local hosts but keep the same
             # sibling structure semantics under the temp dir.
-            test_cache_root = str(Path(tempfile.gettempdir()) / "test_mode_data" / "market_data_cache")
+            test_cache_root = str(Path(tempfile.gettempdir()) / TEST_CACHE_DIRNAME / "market_data_cache")
 
         return True, test_cache_root
     return False, None
