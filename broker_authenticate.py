@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -373,7 +374,12 @@ class BrokerAuth:
         full = self.get_fyers_access_token(force=force)
         parts = full.split(':', 1)
         token = parts[1] if len(parts) > 1 else parts[0]
-        client = fyersModel.FyersModel(token=token, is_async=False, client_id=cfg.app_id, log_path="")
+        # fyers_apiv3 writes fyersApi.log/fyersRequests.log relative to CWD when
+        # log_path is falsy; /home/site/wwwroot is read-only in Azure, so point
+        # it at a writable temp directory instead.
+        client = fyersModel.FyersModel(
+            token=token, is_async=False, client_id=cfg.app_id, log_path=tempfile.gettempdir()
+        )
         return client
 
     def get_fyers_session(self, force: bool = False) -> requests.Session:
