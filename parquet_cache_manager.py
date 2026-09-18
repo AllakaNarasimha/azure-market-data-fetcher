@@ -13,7 +13,7 @@ from azure.core.exceptions import ResourceExistsError
 from azure.storage.blob import BlobServiceClient
 
 from broker_authenticate import is_running_locally
-from cache_utils import is_test_blob_path, test_blob_name
+from cache_utils import is_test_blob_path, test_blob_name, TEST_CONTAINER_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -33,32 +33,41 @@ class BlobSync:
         self._is_local = is_running_locally()
         self.enabled = not self._is_local
         self._container_client = None
+        self._test_container_client = None
         if self.enabled:
             conn_str = os.getenv("MARKET_STORAGE_CONNECTION")
             if conn_str:
                 blob_service = BlobServiceClient.from_connection_string(conn_str)
                 self._container_client = blob_service.get_container_client(self.CONTAINER)
-                try:
-                    self._container_client.create_container()
-                except ResourceExistsError:
-                    pass
-                except Exception:
-                    logger.exception("Failed to create blob container '%s'", self.CONTAINER)
+                self._test_container_client = blob_service.get_container_client(TEST_CONTAINER_NAME)
+                for client, name in ((self._container_client, self.CONTAINER), (self._test_container_client, TEST_CONTAINER_NAME)):
+                    try:
+                        client.create_container()
+                    except ResourceExistsError:
+                        pass
+                    except Exception:
+                        logger.exception("Failed to create blob container '%s'", name)
             else:
                 self.enabled = False
+
+    def _client_for(self, local_path: str):
+        """Test-mode local paths go to the separate test-mode container, else production."""
+        if is_test_blob_path(local_path, self._is_local):
+            return self._test_container_client, True
+        return self._container_client, False
 
     def download_if_missing(self, local_path: str, blob_name: str) -> None:
         if not self.enabled or os.path.exists(local_path):
             return
         try:
-            # When running in TEST_MODE and the local path is the test-mode
-            # cache, download/upload operations should target a test-specific
-            # blob prefix to avoid clobbering production data.
-            if is_test_blob_path(local_path, self._is_local):
+            # TEST_MODE local paths are synced against a separate test-mode
+            # container instead of the production market-data-cache container.
+            container_client, is_test = self._client_for(local_path)
+            if is_test:
                 old_blob = blob_name
                 blob_name = test_blob_name(blob_name)
-                logger.info("[BLOB SYNC] TEST_MODE detected; mapping %s -> %s for local path %s", old_blob, blob_name, local_path)
-            blob = self._container_client.get_blob_client(blob_name)
+                logger.info("[BLOB SYNC] TEST_MODE detected; mapping %s -> %s/%s for local path %s", old_blob, TEST_CONTAINER_NAME, blob_name, local_path)
+            blob = container_client.get_blob_client(blob_name)
             if blob.exists():
                 os.makedirs(os.path.dirname(local_path), exist_ok=True)
                 with open(local_path, "wb") as f:
@@ -70,14 +79,14 @@ class BlobSync:
         if not self.enabled:
             return
         try:
-            # When running in TEST_MODE and writing from the test-mode cache,
-            # upload to a test-specific blob prefix so production blobs are
-            # not overwritten by test artifacts.
-            if is_test_blob_path(local_path, self._is_local):
+            # TEST_MODE local paths are synced against a separate test-mode
+            # container instead of the production market-data-cache container.
+            container_client, is_test = self._client_for(local_path)
+            if is_test:
                 old_blob = blob_name
                 blob_name = test_blob_name(blob_name)
-                logger.info("[BLOB SYNC] TEST_MODE detected; mapping %s -> %s for local path %s", old_blob, blob_name, local_path)
-            blob = self._container_client.get_blob_client(blob_name)
+                logger.info("[BLOB SYNC] TEST_MODE detected; mapping %s -> %s/%s for local path %s", old_blob, TEST_CONTAINER_NAME, blob_name, local_path)
+            blob = container_client.get_blob_client(blob_name)
             with open(local_path, "rb") as f:
                 blob.upload_blob(f.read(), overwrite=True)
         except Exception:

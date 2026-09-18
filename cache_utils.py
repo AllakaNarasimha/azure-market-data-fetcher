@@ -10,6 +10,9 @@ import tempfile
 TEST_CACHE_DIRNAME = "test_mode_data"
 MARKET_CACHE_DIRNAME = "market_data_cache"
 
+# Azure Blob container names allow only lowercase letters, numbers, and hyphens.
+TEST_CONTAINER_NAME = TEST_CACHE_DIRNAME.replace("_", "-")
+
 
 def is_test_cache_path(local_path: str) -> bool:
     """True if `local_path` lives under the test-mode cache folder."""
@@ -28,8 +31,8 @@ def is_test_blob_path(local_path: str, is_local: bool) -> bool:
 
 
 def test_blob_name(blob_name: str) -> str:
-    """Prefix `blob_name` to mirror the local test_mode_data/market_data_cache layout."""
-    return f"{TEST_CACHE_DIRNAME}/{MARKET_CACHE_DIRNAME}/{blob_name}"
+    """Prefix `blob_name` with the market_data_cache folder for the test-mode container."""
+    return f"{MARKET_CACHE_DIRNAME}/{blob_name}"
 
 
 def should_use_test_cache(test_mode: bool, now: Optional[datetime] = None, is_holiday: Optional[Callable[[datetime], bool]] = None, is_local: bool = True) -> Tuple[bool, Optional[str]]:
