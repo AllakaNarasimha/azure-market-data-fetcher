@@ -135,6 +135,11 @@ class LiveScheduler:
             logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to fetch expiries")
             return
 
+        # Collect all weekly/monthly chain responses and persist them in a single
+        # write per symbol instead of once per expiry - avoids repeatedly reading,
+        # deduping, rewriting, and re-uploading the same growing day-partition file.
+        responses = []
+
         for week in range(self.weeks):
             try:
                 expiry_ts = bdm.ExpiryResolver.resolve(expiries, weekly_expiry_count=week)
@@ -145,12 +150,8 @@ class LiveScheduler:
                 chain = manager.get_option_chain(
                     instrument, strikecount=self.strikecount, weekly_expiry_count=week, expiries=expiries
                 )
-                rows = chain_cache.save_fyers_response(
-                    instrument.symbol, chain, source=broker_name, expiry_timestamp=expiry_ts
-                )
-                logging.info(
-                    f"[LiveScheduler] {instrument.symbol} ({broker_name}) weekly+{week} option chain cached ({rows} rows)"
-                )
+                responses.append((chain, expiry_ts))
+                logging.info(f"[LiveScheduler] {instrument.symbol} ({broker_name}) weekly+{week} option chain fetched")
             except Exception:
                 logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) weekly+{week} option chain fetch failed")
 
@@ -164,14 +165,21 @@ class LiveScheduler:
                 chain = manager.get_option_chain(
                     instrument, strikecount=self.strikecount, monthly_expiry_count=month, expiries=expiries
                 )
-                rows = chain_cache.save_fyers_response(
-                    instrument.symbol, chain, source=broker_name, expiry_timestamp=expiry_ts
-                )
-                logging.info(
-                    f"[LiveScheduler] {instrument.symbol} ({broker_name}) monthly+{month} option chain cached ({rows} rows)"
-                )
+                responses.append((chain, expiry_ts))
+                logging.info(f"[LiveScheduler] {instrument.symbol} ({broker_name}) monthly+{month} option chain fetched")
             except Exception:
                 logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) monthly+{month} option chain fetch failed")
+
+        if responses:
+            try:
+                rows = chain_cache.save_fyers_responses_batch(instrument.symbol, responses, source=broker_name)
+                logging.info(
+                    f"[LiveScheduler] {instrument.symbol} ({broker_name}) option chain cached "
+                    f"({rows} rows across {len(responses)} expiries)"
+                )
+            except Exception:
+                logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to save batched option chain")
+
 
 
 class DailyScheduler:

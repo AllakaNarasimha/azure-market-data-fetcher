@@ -200,6 +200,68 @@ class OptionChainCacheManager:
 
         return len(df)
 
+    def save_fyers_responses_batch(
+        self,
+        underlying: str,
+        responses: list[tuple[dict, str]],
+        source: str = "fyers",
+        fetched_at: Optional[datetime] = None,
+    ) -> int:
+        """Flatten and persist multiple `optionchain()` responses (one per expiry) for the
+        same underlying/day in a single read-modify-write-upload cycle, instead of one per
+        response - avoids repeatedly re-reading/re-writing/re-uploading the same growing
+        day-partition file once per weekly/monthly expiry.
+
+        `responses` is a list of (response, expiry_timestamp) pairs.
+        """
+        fetched_at = fetched_at or datetime.now()
+        frames = []
+        expiry_data = None
+        for response, expiry_timestamp in responses:
+            data = response.get("data", {}) if isinstance(response, dict) else {}
+            rows = data.get("optionsChain", [])
+            if rows:
+                df = pd.DataFrame(rows)
+                df["underlying"] = underlying
+                df["source"] = source
+                df["expiry_timestamp"] = expiry_timestamp
+                df["fetched_at"] = fetched_at
+                frames.append(df)
+            if data.get("expiryData"):
+                expiry_data = data["expiryData"]
+
+        saved_rows = 0
+        if frames:
+            df = pd.concat(frames, ignore_index=True)
+
+            partition = self._partition_path(underlying, fetched_at.date())
+            partition.mkdir(parents=True, exist_ok=True)
+            file_path = partition / "part-0.parquet"
+            blob_name = self._blob_name(underlying, fetched_at.date())
+            self._blob_sync.download_if_missing(str(file_path), blob_name)
+
+            if file_path.exists():
+                existing = pd.read_parquet(file_path, engine=self.ENGINE)
+                df = pd.concat([existing, df], ignore_index=True)
+                df = df.drop_duplicates(
+                    subset=["symbol", "source", "expiry_timestamp", "fetched_at"], keep="last"
+                )
+
+            pq.write_table(pa.Table.from_pandas(df, preserve_index=False), file_path)
+            self._blob_sync.upload(str(file_path), blob_name)
+            saved_rows = len(df)
+
+        if expiry_data:
+            expiry_path = self._expiry_path(underlying)
+            expiry_path.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(
+                pa.Table.from_pandas(pd.DataFrame(expiry_data), preserve_index=False),
+                expiry_path,
+            )
+            self._blob_sync.upload(str(expiry_path), self._expiry_blob_name(underlying))
+
+        return saved_rows
+
     def load(self, underlying: str, day: date_cls) -> pd.DataFrame:
         file_path = self._partition_path(underlying, day) / "part-0.parquet"
         self._blob_sync.download_if_missing(str(file_path), self._blob_name(underlying, day))
