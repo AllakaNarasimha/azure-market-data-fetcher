@@ -11,6 +11,7 @@ from typing import Optional
 
 import pandas as pd
 import requests
+from azure.core.exceptions import ResourceExistsError
 from azure.storage.blob import BlobServiceClient
 
 from broker_authenticate import BrokerAuth
@@ -39,8 +40,10 @@ class MasterFileCache:
                 self._container_client = blob_service.get_container_client(self.CONTAINER)
                 try:
                     self._container_client.create_container()
-                except Exception:
+                except ResourceExistsError:
                     pass
+                except Exception:
+                    logger.exception("Failed to create blob container '%s'", self.CONTAINER)
 
     def get(self, filename: str, download_url: str) -> bytes:
         if self.is_local:
@@ -93,7 +96,8 @@ class DhanSecurityMaster:
     def _load(self, date: str) -> pd.DataFrame:
         if date not in self._cache:
             content = MasterFileCache(self.LOCAL_DIR).get(f"master_{date}.csv", self.BASE_URL)
-            self._cache[date] = pd.read_csv(io.BytesIO(content))
+            # Avoid DtypeWarning on large mixed-type CSVs by disabling low_memory
+            self._cache[date] = pd.read_csv(io.BytesIO(content), low_memory=False)
         return self._cache[date]
 
     def get_security_id(
@@ -163,7 +167,8 @@ class FyersSymbolMaster:
         key = f"{name}_{date}"
         if key not in self._cache:
             content = MasterFileCache(self.LOCAL_DIR).get(f"{key}.csv", url)
-            self._cache[key] = pd.read_csv(io.BytesIO(content), header=None)
+            # Avoid DtypeWarning on large mixed-type CSVs by disabling low_memory
+            self._cache[key] = pd.read_csv(io.BytesIO(content), header=None, low_memory=False)
         return self._cache[key]
 
     def validate_equity_symbol(self, symbol: str) -> bool:
@@ -263,6 +268,10 @@ class InstrumentResolver:
         return Instrument(symbol=fyers_symbol, security_id=security_id, exchange_segment="NSE_FNO")
 
 
+class ExpiryNotAvailable(Exception):
+    """Raised when a requested weekly/monthly expiry selector is out of range."""
+
+
 class ExpiryResolver:
     """Resolves weekly_expiry_count/monthly_expiry_count selectors to an expiry timestamp.
 
@@ -305,7 +314,7 @@ class ExpiryResolver:
 
         if monthly_expiry_count is not None:
             if monthly_expiry_count >= len(monthly):
-                raise IndexError(
+                raise ExpiryNotAvailable(
                     f"monthly_expiry_count {monthly_expiry_count} out of range; "
                     f"only {len(monthly)} monthly expiries available"
                 )
@@ -313,7 +322,7 @@ class ExpiryResolver:
 
         count = weekly_expiry_count or 0
         if count >= len(weekly):
-            raise IndexError(
+            raise ExpiryNotAvailable(
                 f"weekly_expiry_count {count} out of range; only {len(weekly)} weekly expiries available"
             )
         return weekly[count]["expiry"]
@@ -562,21 +571,21 @@ def main() -> None:
     for name, manager in PreferredBrokers.managers().items():
         try:
             quote = manager.get_price(instrument)
-            print(f"[OK] {name.capitalize()} quote for SBIN: {quote}")
+            logger.info("%s quote for SBIN: %s", name.capitalize(), quote)
         except Exception as e:
-            print(f"[ERROR] {name.capitalize()} quote fetch failed: {e}")
+            logger.error("%s quote fetch failed: %s", name.capitalize(), e)
 
         try:
             history = manager.get_historical_data(instrument, "1D", "EQUITY", start_date, end_date)
-            print(f"[OK] {name.capitalize()} history (last 5 days) for SBIN: {history}")
+            logger.info("%s history (last 5 days) for SBIN: %s", name.capitalize(), history)
         except Exception as e:
-            print(f"[ERROR] {name.capitalize()} history fetch failed: {e}")
+            logger.error("%s history fetch failed: %s", name.capitalize(), e)
 
         try:
             chain = manager.get_option_chain(instrument, strikecount=10, weekly_expiry_count=6, monthly_expiry_count=3)
-            print(f"[OK] {name.capitalize()} option chain for SBIN: {chain}")
+            logger.info("%s option chain for SBIN: %s", name.capitalize(), chain)
         except Exception as e:
-            print(f"[ERROR] {name.capitalize()} option chain fetch failed: {e}")
+            logger.error("%s option chain fetch failed: %s", name.capitalize(), e)
 
 
 if __name__ == "__main__":

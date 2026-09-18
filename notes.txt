@@ -19,3 +19,7 @@ step4: func start
 
 setup githug
 git remote set-url origin https://github.com/AllakaNarasimha/azure-market-data-fetcher.git
+
+
+Install python 
+winget install --id=Python.Python.3.11 -e --source=winget

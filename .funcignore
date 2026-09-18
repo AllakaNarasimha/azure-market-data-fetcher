@@ -1,6 +1,10 @@
 .venv/
+.venv311/
 local_data/
 local.settings.json
+# Local azure SDK stub folder (shadows the real azure-functions/azure-identity/
+# azure-storage-blob packages) - must never be deployed.
+azure/
 app.zip
 app_clean.zip
 run_auth.py

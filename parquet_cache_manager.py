@@ -1,4 +1,5 @@
 import os
+import logging
 import urllib.parse
 from datetime import datetime, time, timedelta
 from typing import List, Dict, Tuple, Optional
@@ -7,6 +8,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
+
+logger = logging.getLogger(__name__)
 
 
 # =====================================================================
@@ -127,7 +130,7 @@ class CacheRegistry:
                     engine=CacheConstants.ENGINE,
                 )
             except Exception as exc:
-                print(f"⚠️ [REGISTRY] Failed to read registry: {exc}")
+                logger.warning("[REGISTRY] Failed to read registry: %s", exc)
 
         return pd.DataFrame(columns=CacheConstants.REGISTRY_COLUMNS)
 
@@ -164,9 +167,9 @@ class CacheRegistry:
                 index=False,
             )
 
-            print(f"📝 [REGISTRY] {symbol} | {interval} | {start_dt} → {end_dt} | {reason}")
+            logger.info("[REGISTRY] %s | %s | %s → %s | %s", symbol, interval, start_dt, end_dt, reason)
         except Exception as exc:
-            print(f"⚠️ [REGISTRY] Failed to save log: {exc}")
+            logger.warning("[REGISTRY] Failed to save log: %s", exc)
 
     def is_logged_as_off(
         self,
@@ -412,7 +415,7 @@ class ParquetCacheManager:
             self._write_partitions(symbol, interval, df)
             return True
         except Exception as exc:
-            print(f"⚠️ [PARQUET] Failed to save {symbol}: {exc}")
+            logger.warning("[PARQUET] Failed to save %s: %s", symbol, exc)
             return False
 
     def clean_and_save_candles(
@@ -456,13 +459,13 @@ class ParquetCacheManager:
 
             invalid_count = int(invalid_ohlc.sum()) if not invalid_ohlc.empty else 0
             if invalid_count > 0:
-                print(f"⚠️ [PARQUET] Dropping {invalid_count} invalid OHLCV rows for {symbol}")
+                logger.warning("[PARQUET] Dropping %d invalid OHLCV rows for %s", invalid_count, symbol)
                 df = df[~invalid_ohlc]
 
             cleaned = df.to_dict("records")
             return self.save_candles(symbol, cleaned, interval, fetch_start, fetch_end)
         except Exception as exc:
-            print(f"⚠️ [PARQUET] clean_and_save_candles failed for {symbol}: {exc}")
+            logger.warning("[PARQUET] clean_and_save_candles failed for %s: %s", symbol, exc)
             return False
             
     def load_candles(
@@ -543,7 +546,7 @@ class ParquetCacheManager:
 
             return df.to_dict("records")
         except Exception as exc:
-            print(f"⚠️ [PARQUET] Failed to load {symbol}: {exc}")
+            logger.warning("[PARQUET] Failed to load %s: %s", symbol, exc)
             return []
 
     def get_missing_date_ranges(
@@ -794,5 +797,5 @@ class ParquetCacheManager:
         try:
             return pd.read_parquet(partition_path, engine=CacheConstants.ENGINE)
         except Exception as exc:
-            print(f"⚠️ [PARQUET] Failed to read partition {partition_path}: {exc}")
+            logger.warning("[PARQUET] Failed to read partition %s: %s", partition_path, exc)
             return pd.DataFrame()

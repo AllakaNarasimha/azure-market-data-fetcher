@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 import pandas as pd
 from pandas.tseries.offsets import CustomBusinessDay
 import azure.functions as func
-from azure.storage.blob import BlobServiceClient
 
 import broker_data_manager as bdm
 from parquet_cache_manager import ParquetCacheManager
@@ -26,62 +25,6 @@ except Exception:
     logging.exception("Failed to load local.settings.json into environment")
 
 app = func.FunctionApp()
-
-# ---------------------------------------------------------
-# CLASS: FileWriter
-# ---------------------------------------------------------
-class FileWriter:
-    def __init__(self, is_local: bool, storage_connection: str = None, container: str = "market-data"):
-        self.is_local = is_local
-        self.container = container
-        self.blob_service_client = None
-        
-        # Only initialize Azure client if we are in the cloud
-        if not self.is_local:
-            if not storage_connection:
-                logging.error("[ERROR] Storage connection string missing!")
-                raise ValueError("Storage connection string is required for Azure mode.")
-            self.blob_service_client = BlobServiceClient.from_connection_string(storage_connection)
-
-    def write_json(self, directory: str, filename: str, data: list):
-        try:
-            if self.is_local:
-                local_dir = os.path.join(os.getcwd(), "local_data", directory)
-                os.makedirs(local_dir, exist_ok=True)
-                file_path = os.path.join(local_dir, filename)
-                
-                with open(file_path, 'w') as f:
-                    json.dump(data, f, indent=2)
-                logging.info(f"[OK] Local JSON saved: {file_path}")
-                
-            else:
-                blob_name = f"{directory}/{filename}"
-                blob_client = self.blob_service_client.get_blob_client(container=self.container, blob=blob_name)
-                blob_client.upload_blob(json.dumps(data, indent=2), overwrite=True)
-                logging.info(f"[OK] Azure JSON saved: {blob_name}")
-                
-        except Exception as e:
-            logging.error(f"[ERROR] Failed to write JSON: {e}")
-
-    def write_parquet(self, directory: str, filename: str, df: pd.DataFrame):
-        try:
-            if self.is_local:
-                local_dir = os.path.join(os.getcwd(), "local_data", directory)
-                os.makedirs(local_dir, exist_ok=True)
-                file_path = os.path.join(local_dir, filename)
-                
-                df.to_parquet(file_path, engine='pyarrow')
-                logging.info(f"[OK] Local Parquet saved: {file_path}")
-                
-            else:
-                blob_name = f"{directory}/{filename}"
-                blob_client = self.blob_service_client.get_blob_client(container=self.container, blob=blob_name)
-                parquet_bytes = df.to_parquet(engine='pyarrow')
-                blob_client.upload_blob(parquet_bytes, overwrite=True)
-                logging.info(f"[OK] Azure Parquet saved: {blob_name}")
-                
-        except Exception as e:
-            logging.error(f"[ERROR] Failed to write Parquet: {e}")
 
 
 class MarketCalendar:
@@ -194,7 +137,7 @@ class LiveScheduler:
         for week in range(self.weeks):
             try:
                 expiry_ts = bdm.ExpiryResolver.resolve(expiries, weekly_expiry_count=week)
-            except IndexError:
+            except bdm.ExpiryNotAvailable:
                 logging.info(f"[LiveScheduler] {instrument.symbol} ({broker_name}) only {week} weekly expiries available")
                 break
             try:
@@ -211,7 +154,7 @@ class LiveScheduler:
         for month in range(self.months):
             try:
                 expiry_ts = bdm.ExpiryResolver.resolve(expiries, monthly_expiry_count=month)
-            except IndexError:
+            except bdm.ExpiryNotAvailable:
                 logging.info(f"[LiveScheduler] {instrument.symbol} ({broker_name}) only {month} monthly expiries available")
                 break
             try:
@@ -306,27 +249,21 @@ class DailyScheduler:
         except Exception:
             logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) option chain fetch failed")
 
-@app.timer_trigger(schedule="0 * * * * 1-5", arg_name="mytimer", run_on_startup=False, use_monitor=False)
+# TEST_MODE runs both schedulers once when the host starts, via the SDK's
+# supported run_on_startup mechanism. Do NOT execute scheduler logic at
+# module import time - the Functions worker imports this module to index
+# functions, and synchronous broker/network calls during that phase crash
+# the host with "Value cannot be null. (Parameter 'provider')".
+_test_mode = os.getenv("TEST_MODE", "false").strip().lower() == "true"
+logging.info(f"Startup env: TEST_MODE={os.getenv('TEST_MODE')!r}, WEBSITE_INSTANCE_ID={os.getenv('WEBSITE_INSTANCE_ID')!r}")
+
+@app.timer_trigger(schedule="0 * * * * 1-5", arg_name="mytimer", run_on_startup=_test_mode, use_monitor=False)
 def market_data_fetcher(mytimer: func.TimerRequest) -> None:
     LiveScheduler().run()
 
 
-@app.timer_trigger(schedule="0 30 8 * * 1-5", arg_name="dailyTimer", run_on_startup=False, use_monitor=False)
+@app.timer_trigger(schedule="0 30 8 * * 1-5", arg_name="dailyTimer", run_on_startup=_test_mode, use_monitor=False)
 def daily_job(dailyTimer: func.TimerRequest) -> None:
     DailyScheduler().run()
 
-
-# If TEST_MODE is enabled in environment, run both schedulers once on import/startup.
-# Note: `local.settings.json` is only used locally. In Azure, set `TEST_MODE` under
-# Application settings for the Function App (Portal or `az functionapp config appsettings set`).
-_test_mode_val = os.getenv("TEST_MODE")
-_website_id = os.getenv("WEBSITE_INSTANCE_ID")
-logging.info(f"Startup env: TEST_MODE={_test_mode_val!r}, WEBSITE_INSTANCE_ID={_website_id!r}")
-if str(_test_mode_val or "").strip().lower() == "true":
-    logging.info("TEST_MODE=true: running one-off market_data_fetcher and daily_job")
-    try:
-        LiveScheduler().run()
-        DailyScheduler().run()
-    except Exception:
-        logging.exception("[TEST_MODE] One-off run failed")
 

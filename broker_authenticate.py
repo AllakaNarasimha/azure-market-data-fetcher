@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pyotp
 import requests
+from azure.core.exceptions import ResourceExistsError
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 from azure.storage.blob import BlobServiceClient
@@ -27,6 +28,17 @@ class ConfigStore:
     def __init__(self):
         self.is_local = os.getenv("WEBSITE_INSTANCE_ID") is None
         self.key_vault_url = os.getenv("KEY_VAULT_URL")
+        # When running locally, ensure values from local.settings.json are
+        # loaded into the process environment so standalone scripts (or
+        # modules run directly) can read config via os.getenv.
+        if self.is_local and self.LOCAL_SETTINGS_PATH.exists():
+            try:
+                data = json.loads(self.LOCAL_SETTINGS_PATH.read_text())
+                for k, v in data.get("Values", {}).items():
+                    if k not in os.environ:
+                        os.environ[k] = v
+            except Exception:
+                logger.exception("Failed to load local.settings.json into environment")
 
     def load(self, env_var: str) -> dict:
         raw = os.getenv(env_var)
@@ -77,8 +89,10 @@ class TokenCache:
                 self._container_client = blob_service.get_container_client(self.CONTAINER)
                 try:
                     self._container_client.create_container()
-                except Exception:
+                except ResourceExistsError:
                     pass
+                except Exception:
+                    logger.exception("Failed to create blob container '%s'", self.CONTAINER)
 
     def load(self, broker: str) -> Optional[dict]:
         try:
@@ -379,15 +393,15 @@ def main() -> None:
 
     try:
         dhan_token = DhanTOTPAuthenticator().get_access_token()
-        print(f"[OK] Dhan access token: {dhan_token[:20]}...")
+        logger.info("Dhan access token: %s...", dhan_token[:20])
     except Exception as e:
-        print(f"[ERROR] Dhan authentication failed: {e}")
+        logger.error("Dhan authentication failed: %s", e)
 
     try:
         fyers_token = FyersTOTPAuthenticator().get_access_token()
-        print(f"[OK] Fyers access token: {fyers_token[:20]}...")
+        logger.info("Fyers access token: %s...", fyers_token[:20])
     except Exception as e:
-        print(f"[ERROR] Fyers authentication failed: {e}")
+        logger.error("Fyers authentication failed: %s", e)
 
 
 if __name__ == "__main__":

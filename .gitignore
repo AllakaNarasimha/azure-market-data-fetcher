@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
+.venv311/
 authenticate.log
 broker_authenticate.notes.md
 local_data/broker_tokens/
