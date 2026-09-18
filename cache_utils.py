@@ -12,10 +12,31 @@ import tempfile
 # paths using the exact same folder name instead of a duplicated literal.
 TEST_CACHE_DIRNAME = "test_mode_data"
 
+# Name of the canonical market data cache folder, shared with BlobSync so the
+# test-mode blob prefix mirrors the local test_mode_data/market_data_cache
+# folder order instead of duplicating the literal.
+MARKET_CACHE_DIRNAME = "market_data_cache"
+
 
 def is_test_cache_path(local_path: str) -> bool:
     """True if `local_path` lives under the test-mode cache folder."""
     return TEST_CACHE_DIRNAME in str(local_path).replace("\\", "/").lower()
+
+
+def is_test_blob_path(local_path: str, is_local: bool) -> bool:
+    """True if `local_path` should be routed to the test-mode blob prefix.
+
+    Requires TEST_MODE enabled, `local_path` under the test-mode cache folder,
+    and `is_local` False - blob sync is a no-op when running locally, so the
+    prefix only ever applies to a deployed (non-local) run.
+    """
+    test_mode = os.getenv("TEST_MODE", "").strip().lower() == "true"
+    return test_mode and not is_local and is_test_cache_path(local_path)
+
+
+def test_blob_name(blob_name: str) -> str:
+    """Prefix `blob_name` to mirror the local test_mode_data/market_data_cache layout."""
+    return f"{TEST_CACHE_DIRNAME}/{MARKET_CACHE_DIRNAME}/{blob_name}"
 
 
 def should_use_test_cache(test_mode: bool, now: Optional[datetime] = None, is_holiday: Optional[Callable[[datetime], bool]] = None, is_local: bool = True) -> Tuple[bool, Optional[str]]:
@@ -43,15 +64,15 @@ def should_use_test_cache(test_mode: bool, now: Optional[datetime] = None, is_ho
         # Determine the canonical market cache root's parent. Prefer a repo-relative
         # `market_data_cache` sibling layout so test artifacts appear alongside the
         # production cache folder instead of nested under it.
-        canonical = Path("market_data_cache")
+        canonical = Path(MARKET_CACHE_DIRNAME)
         parent = canonical.parent if canonical.parent != Path("") else Path(".")
 
         if is_local:
-            test_cache_root = str(parent / TEST_CACHE_DIRNAME / "market_data_cache")
+            test_cache_root = str(parent / TEST_CACHE_DIRNAME / MARKET_CACHE_DIRNAME)
         else:
             # Use a writable temp dir on non-local hosts but keep the same
             # sibling structure semantics under the temp dir.
-            test_cache_root = str(Path(tempfile.gettempdir()) / TEST_CACHE_DIRNAME / "market_data_cache")
+            test_cache_root = str(Path(tempfile.gettempdir()) / TEST_CACHE_DIRNAME / MARKET_CACHE_DIRNAME)
 
         return True, test_cache_root
     return False, None
