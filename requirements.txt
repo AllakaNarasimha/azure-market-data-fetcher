@@ -9,4 +9,5 @@ requests
 pyotp
 dhanhq
 fyers-apiv3
+pytest
 

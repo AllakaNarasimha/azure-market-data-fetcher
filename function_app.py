@@ -89,17 +89,23 @@ class LiveScheduler:
 
     def run(self) -> None:
         is_local = is_running_locally()
-        test_mode = os.getenv("TEST_MODE", "false").strip().lower() == "true"
+        # Read env var for informational use, but only enable TEST_MODE behavior
+        # while the startup window is active as determined by _is_test_mode_active().
+        _ = os.getenv("TEST_MODE", "false").strip().lower() == "true"
 
         ist_tz = pytz.timezone('Asia/Kolkata')
         now = datetime.now(ist_tz)
+        test_mode_active = _is_test_mode_active(now)
 
         market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
         market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
 
-        use_test_cache, test_cache_root = should_use_test_cache(test_mode, now=now, is_holiday=MarketCalendar.is_holiday, is_local=is_local)
+        use_test_cache, test_cache_root = should_use_test_cache(test_mode_active, now=now, is_holiday=MarketCalendar.is_holiday, is_local=is_local)
 
-        if not use_test_cache and not (test_mode or (market_open <= now <= market_close) and not MarketCalendar.is_holiday(now)):
+        # Only allow scheduler execution when within market hours OR when the
+        # TEST_MODE startup window is active. After the window expires, TEST_MODE
+        # behavior will not permit runs outside market hours.
+        if not use_test_cache and not (test_mode_active or (market_open <= now <= market_close) and not MarketCalendar.is_holiday(now)):
             # If not in test-mode and market is closed/holiday, skip.
             # The above condition preserves prior behavior when test_mode is False.
             logging.info("Market is closed or holiday. Skipping.")
@@ -196,16 +202,17 @@ class DailyScheduler:
 
     def run(self) -> None:
         is_local = is_running_locally()
-        test_mode = os.getenv("TEST_MODE", "false").strip().lower() == "true"
+        _ = os.getenv("TEST_MODE", "false").strip().lower() == "true"
         ist_tz = pytz.timezone('Asia/Kolkata')
         now = datetime.now(ist_tz)
+        test_mode_active = _is_test_mode_active(now)
 
         market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
         market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
 
-        use_test_cache, test_cache_root = should_use_test_cache(test_mode, now=now, is_holiday=MarketCalendar.is_holiday, is_local=is_local)
+        use_test_cache, test_cache_root = should_use_test_cache(test_mode_active, now=now, is_holiday=MarketCalendar.is_holiday, is_local=is_local)
 
-        if not use_test_cache and not (test_mode or (market_open <= now <= market_close) and not MarketCalendar.is_holiday(now)):
+        if not use_test_cache and not (test_mode_active or (market_open <= now <= market_close) and not MarketCalendar.is_holiday(now)):
             logging.info("Market is closed or holiday. Skipping daily job.")
             return
 
@@ -287,13 +294,35 @@ class DailyScheduler:
 # the host with "Value cannot be null. (Parameter 'provider')".
 _test_mode = os.getenv("TEST_MODE", "false").strip().lower() == "true"
 logging.info(f"Startup env: TEST_MODE={os.getenv('TEST_MODE')!r}, WEBSITE_SITE_NAME={os.getenv('WEBSITE_SITE_NAME')!r}")
+# Establish a short lived TEST_MODE window at process start.
+# When TEST_MODE is enabled we allow scheduler runs for a fixed window
+# (default 10 minutes) starting at module import (i.e., host start).
+IST_TZ = pytz.timezone('Asia/Kolkata')
+_test_mode_env = os.getenv("TEST_MODE", "false").strip().lower() == "true"
+_test_mode_minutes = int(os.getenv("TEST_MODE_MINUTES", "10"))
+_TEST_MODE_START = None
+_TEST_MODE_EXPIRY = None
+if _test_mode_env:
+    _TEST_MODE_START = datetime.now(IST_TZ)
+    _TEST_MODE_EXPIRY = _TEST_MODE_START + timedelta(minutes=_test_mode_minutes)
+    logging.info("TEST_MODE enabled: running for %s minutes until %s", _test_mode_minutes, _TEST_MODE_EXPIRY.isoformat())
 
-@app.timer_trigger(schedule="0 * * * * 1-5", arg_name="mytimer", run_on_startup=_test_mode, use_monitor=False)
+
+def _is_test_mode_active(now: datetime) -> bool:
+    """Return True when TEST_MODE is enabled and still within the startup window."""
+    if not _test_mode_env:
+        return False
+    if _TEST_MODE_EXPIRY is None:
+        return False
+    return now <= _TEST_MODE_EXPIRY
+
+
+@app.schedule(schedule="0 * * * * 1-5", arg_name="mytimer", run_on_startup=_test_mode_env, use_monitor=False)
 def market_data_fetcher(mytimer: func.TimerRequest) -> None:
     LiveScheduler().run()
 
 
-@app.timer_trigger(schedule="0 30 8 * * 1-5", arg_name="dailyTimer", run_on_startup=_test_mode, use_monitor=False)
+@app.schedule(schedule="0 30 8 * * 1-5", arg_name="dailyTimer", run_on_startup=_test_mode_env, use_monitor=False)
 def daily_job(dailyTimer: func.TimerRequest) -> None:
     DailyScheduler().run()
 

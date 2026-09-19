@@ -173,6 +173,8 @@ class FyersConfig(BrokerConfig):
     # Map logical field names to alternate environment variables or secrets.
     MAPPING = {
         "pin": "FYERS_PIN",
+        "app_secret": "FYERS_APP",
+        "totp_secret": "FYERS_TOTP"
     }
 
 class DhanTOTPAuthenticator:
