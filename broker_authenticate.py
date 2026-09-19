@@ -158,6 +158,11 @@ class DhanConfig(BrokerConfig):
         "totp_secret": None,
         "base_url": "https://api.dhan.co/v2",
     }
+    # Map logical field names to alternate environment variables or secrets.
+    MAPPING = {
+        "pin": "DHAN_PIN",
+        "totp_secret": "DHAN_TOTP"
+    }
 
 
 class FyersConfig(BrokerConfig):
