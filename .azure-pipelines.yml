@@ -3,21 +3,17 @@ trigger:
     include:
       - master
 
-# 1. Link your centralized Azure Repo containing the templates
 resources:
   repositories:
     - repository: templates
       type: git
-      name: Pipeline-Templates/Pipeline-Templates  # Must match your ProjectName/RepoName
+      name: Pipeline-Templates/Pipeline-Templates  
       ref: refs/heads/main
 
 stages:
-  # 2. Call the centralized orchestrator template from the other repo
   - template: master-deploy.yml@templates
     parameters:
       techStack: 'python'                                   
-      appName: 'marketdata-func-0916-narasimha'               
+      appName: 'marketdata-func-0916-narasimha'              
       environmentName: 'Development'
-      azureServiceConnection: 'MyAzureConnection'           
-      # Pass the Azure Repos pipeline template commit hash down into the package description
-      templateCommit: '$(resources.repositories.templates.version)'
+      azureServiceConnection: 'MyAzureConnection'
