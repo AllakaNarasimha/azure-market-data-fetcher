@@ -20,5 +20,4 @@ stages:
       appName: 'marketdata-func-0916-narasimha'               # Your exact Azure App/Function name
       environmentName: 'Development'
       azureServiceConnection: 'Azure subscription 1'        # Verified against az account show
-      resourceGroup: 'rg-marketdata-dev-eastus'
-      pythonVersion: '3.11'
+     
