@@ -15,7 +15,9 @@ stages:
   # 2. Call the centralized orchestrator template from the other repo
   - template: master-deploy.yml@templates
     parameters:
-      techStack: 'python'                                   # Your app's tech stack
-      appName: 'marketdata-func-0916-narasimha'               # Your exact Azure Function App name
+      techStack: 'python'                                   
+      appName: 'marketdata-func-0916-narasimha'               
       environmentName: 'Development'
-      azureServiceConnection: 'MyAzureConnection'           # Explicitly passing your service connection name
+      azureServiceConnection: 'MyAzureConnection'           
+      # Pass the Azure Repos pipeline template commit hash down into the package description
+      templateCommit: '$(resources.repositories.templates.version)'
