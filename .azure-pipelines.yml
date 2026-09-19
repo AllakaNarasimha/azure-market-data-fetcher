@@ -10,7 +10,7 @@ resources:
     - repository: templates
       type: git
       name: Pipeline-Templates/Pipeline-Templates  # Must be ProjectName/RepoName
-      ref: refs/heads/master
+      ref: refs/heads/main
 
 stages:
   # 2. Call the centralized orchestrator template from the other repo
