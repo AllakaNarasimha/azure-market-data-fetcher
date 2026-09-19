@@ -19,5 +19,5 @@ stages:
       techStack: 'python'                                   # Your app's tech stack
       appName: 'marketdata-func-0916-narasimha'               # Your exact Azure App/Function name
       environmentName: 'Development'
-      azureServiceConnection: 'Azure subscription 1'        # Verified against az account show
+      azureServiceConnection: 'MyAzureConnection'        # Verified against az account show
      
