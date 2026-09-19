@@ -1,18 +1,23 @@
 trigger:
   branches:
     include:
+      - master
       - main
 
-pool:
-  vmImage: 'ubuntu-latest'
+# 1. Link your centralized Azure Repo containing the templates
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: nimalantech/Pipeline-Templates  # Format: YourAzureOrg/YourTemplateRepo
 
-steps:
-- task: UsePythonVersion@0
-  inputs:
-    versionSpec: '3.10'
-
-- script: |
-    python -m pip install --upgrade pip
-    pip install -r requirements.txt
-    pytest -q
-  displayName: 'Install and run tests'
+stages:
+  # 2. Call the centralized orchestrator template from the other repo
+  - template: master-deploy.yml@templates
+    parameters:
+      techStack: 'python'                                   # Your app's tech stack
+      appName: 'marketdata-func-0916-narasimha'               # Your exact Azure App/Function name
+      environmentName: 'Development'
+      azureServiceConnection: 'Azure subscription 1'        # Verified against az account show
+      resourceGroup: 'rg-marketdata-dev-eastus'
+      pythonVersion: '3.11'
