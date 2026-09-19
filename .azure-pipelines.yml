@@ -9,7 +9,8 @@ resources:
   repositories:
     - repository: templates
       type: git
-      name: nimalantech/Pipeline-Templates  # Format: YourAzureOrg/YourTemplateRepo
+      name: Pipeline-Templates/Pipeline-Templates  # Must be ProjectName/RepoName
+      ref: refs/heads/master
 
 stages:
   # 2. Call the centralized orchestrator template from the other repo
