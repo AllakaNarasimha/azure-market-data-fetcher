@@ -2,14 +2,13 @@ trigger:
   branches:
     include:
       - master
-      - main
 
 # 1. Link your centralized Azure Repo containing the templates
 resources:
   repositories:
     - repository: templates
       type: git
-      name: Pipeline-Templates/Pipeline-Templates  # Must be ProjectName/RepoName
+      name: Pipeline-Templates/Pipeline-Templates  # Must match your ProjectName/RepoName
       ref: refs/heads/main
 
 stages:
@@ -17,7 +16,6 @@ stages:
   - template: master-deploy.yml@templates
     parameters:
       techStack: 'python'                                   # Your app's tech stack
-      appName: 'marketdata-func-0916-narasimha'               # Your exact Azure App/Function name
+      appName: 'marketdata-func-0916-narasimha'               # Your exact Azure Function App name
       environmentName: 'Development'
-      azureServiceConnection: 'MyAzureConnection'        # Verified against az account show
-     
+      azureServiceConnection: 'MyAzureConnection'           # Explicitly passing your service connection name
