@@ -13,4 +13,3 @@ dhanhq
 fyers-apiv3
 pytest
 azure-servicebus
-azure-functions-worker
