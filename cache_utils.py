@@ -7,6 +7,9 @@ from typing import Callable, Optional, Tuple
 from pathlib import Path
 import tempfile
 
+from market_times import MarketTimes
+from env_config import EnvConfig
+
 TEST_CACHE_DIRNAME = "test_mode_data"
 MARKET_CACHE_DIRNAME = "market_data_cache"
 
@@ -23,7 +26,7 @@ def is_test_blob_path(local_path: str, is_local: bool) -> bool:
     and `is_local` False - blob sync is a no-op when running locally, so the
     prefix only ever applies to a deployed (non-local) run.
     """
-    test_mode = os.getenv("TEST_MODE", "").strip().lower() == "true"
+    test_mode = EnvConfig.test_mode()
     return test_mode and not is_local and is_test_cache_path(local_path)
 
 
@@ -40,11 +43,16 @@ def should_use_test_cache(test_mode: bool, now: Optional[datetime] = None, is_ho
     - `now`: current datetime in Asia/Kolkata (if None, uses now())
     - `is_holiday`: callable taking a datetime and returning True if holiday
     """
-    tz = pytz.timezone("Asia/Kolkata")
+    tz = pytz.timezone(MarketTimes.timezone())
     now = now or datetime.now(tz)
 
-    market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    market_close = now.replace(hour=16, minute=00, second=0, microsecond=0)
+    market_open = now.replace(
+        hour=MarketTimes.open().hour, minute=MarketTimes.open().minute, second=0, microsecond=0
+    )
+    # Some callers expect market_close to be end-of-day inclusive; keep same minute precision
+    market_close = now.replace(
+        hour=MarketTimes.close().hour, minute=MarketTimes.close().minute, second=0, microsecond=0
+    )
 
     market_closed = not (market_open <= now <= market_close)
     market_holiday = is_holiday(now) if is_holiday is not None else False
