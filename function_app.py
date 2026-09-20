@@ -283,12 +283,13 @@ _test_mode = EnvConfig.test_mode()
 logging.info(f"Startup env: TEST_MODE={EnvConfig.env('TEST_MODE')!r}, WEBSITE_SITE_NAME={EnvConfig.website_site_name()!r}")
 # Establish a short lived TEST_MODE window at process start.
 # When TEST_MODE is enabled we allow scheduler runs for a fixed window
-# (default 10 minutes) starting at module import (i.e., host start).
+# (default 5 minutes) starting at module import (i.e., host start).
 IST_TZ = pytz.timezone(MarketTimes.timezone())
 _test_mode_env = EnvConfig.test_mode()
 _test_mode_minutes = EnvConfig.test_mode_minutes()
 _TEST_MODE_START = None
 _TEST_MODE_EXPIRY = None
+_test_mode_completed_logged = False
 if _test_mode_env:
     _TEST_MODE_START = datetime.now(IST_TZ)
     _TEST_MODE_EXPIRY = _TEST_MODE_START + timedelta(minutes=_test_mode_minutes)
@@ -297,11 +298,20 @@ if _test_mode_env:
 
 def _is_test_mode_active(now: datetime) -> bool:
     """Return True when TEST_MODE is enabled and still within the startup window."""
+    global _test_mode_completed_logged
     if not _test_mode_env:
         return False
     if _TEST_MODE_EXPIRY is None:
         return False
-    return now <= _TEST_MODE_EXPIRY
+    if now <= _TEST_MODE_EXPIRY:
+        return True
+    if not _test_mode_completed_logged:
+        logging.info(
+            "TEST_MODE window completed: ran for %s minutes, expired at %s",
+            _test_mode_minutes, _TEST_MODE_EXPIRY.isoformat(),
+        )
+        _test_mode_completed_logged = True
+    return False
 
 # Live job runs at every minute of every hour
 @app.schedule(schedule="0 * * * * 1-5", arg_name="mytimer", run_on_startup=_test_mode_env, use_monitor=False)

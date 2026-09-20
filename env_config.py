@@ -37,7 +37,7 @@ class EnvConfig:
 
     @classmethod
     def test_mode_minutes(cls) -> int:
-        raw = cls.env("TEST_MODE_MINUTES", "10") or "10"
+        raw = cls.env("TEST_MODE_MINUTES", "5") or "5"
         try:
             return int(raw)
         except Exception:
