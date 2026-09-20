@@ -313,8 +313,9 @@ def _is_test_mode_active(now: datetime) -> bool:
         _test_mode_completed_logged = True
     return False
 
-# Live job runs at every minute of every hour
-@app.schedule(schedule="0 * * * * 1-5", arg_name="mytimer", run_on_startup=_test_mode_env, use_monitor=False)
+# TEST_MODE must tick on weekends so the five-minute window can close and log completion.
+_live_schedule = "0 * * * * *" if _test_mode_env else "0 * * * * 1-5"
+@app.schedule(schedule=_live_schedule, arg_name="mytimer", run_on_startup=_test_mode_env, use_monitor=False)
 def market_data_fetcher(mytimer: func.TimerRequest) -> None:
     LiveScheduler().run()
 
