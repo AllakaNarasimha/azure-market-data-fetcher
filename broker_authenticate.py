@@ -131,6 +131,25 @@ class Totp:
             logger.exception("Failed to compute TOTP code")
         return None
 
+
+def _safe_json(resp: requests.Response, step: str) -> dict:
+    """Parse a broker API response as JSON, raising a clear error on non-JSON bodies.
+
+    Brokers can return an empty or non-JSON body (rate-limit/WAF block) instead of
+    a JSON error payload; without this the caller sees an opaque JSONDecodeError.
+    """
+    if not resp.content:
+        return {}
+    try:
+        return resp.json()
+    except ValueError as exc:
+        snippet = resp.text[:200]
+        raise RuntimeError(
+            f"Fyers {step} returned a non-JSON response (status {resp.status_code}); "
+            f"likely rate-limited/blocked. Body: {snippet!r}"
+        ) from exc
+
+
 class BrokerConfig:
     ENV_VAR: str = ""
     FIELDS: dict = {}
@@ -246,7 +265,7 @@ class FyersTOTPAuthenticator:
             json={"fy_id": self._b64(cfg.client_id), "app_id": "2"},
             timeout=10,
         )
-        data = resp.json() if resp.content else {}
+        data = _safe_json(resp, "send_login_otp")
         request_key = data.get("request_key")
         if resp.status_code != 200 or not request_key:
             raise RuntimeError(f"Fyers send_login_otp failed: {resp.status_code} {data}")
@@ -262,7 +281,7 @@ class FyersTOTPAuthenticator:
                 json={"request_key": request_key, "otp": totp_code},
                 timeout=10,
             )
-            data = resp.json() if resp.content else {}
+            data = _safe_json(resp, "verify_otp")
             if resp.status_code == 200 and data.get("request_key"):
                 request_key_2 = data["request_key"]
                 break
@@ -276,7 +295,7 @@ class FyersTOTPAuthenticator:
             json={"request_key": request_key_2, "identity_type": "pin", "identifier": self._b64(cfg.pin)},
             timeout=10,
         )
-        data = resp.json() if resp.content else {}
+        data = _safe_json(resp, "verify_pin")
         session_token = (data.get("data") or {}).get("access_token")
         if resp.status_code != 200 or not session_token:
             raise RuntimeError(f"Fyers verify_pin failed: {resp.status_code} {data}")
@@ -296,7 +315,7 @@ class FyersTOTPAuthenticator:
             "create_cookie": True,
         }
         resp = session.post("https://api-t1.fyers.in/api/v3/token", json=payload, timeout=10)
-        data = resp.json() if resp.content else {}
+        data = _safe_json(resp, "token exchange")
         url = data.get("Url")
         if not url:
             raise RuntimeError(f"Fyers token exchange failed: {resp.status_code} {data}")
