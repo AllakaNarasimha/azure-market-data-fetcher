@@ -41,7 +41,7 @@ class EnvConfig:
         try:
             return int(raw)
         except Exception:
-            return 10
+            return 5
 
     @classmethod
     def option_chain_symbols(cls) -> List[str]:

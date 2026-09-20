@@ -1,7 +1,10 @@
 import importlib
+import logging
 import os
 import sys
 from datetime import datetime, timedelta
+
+from cache_utils import is_test_blob_path, test_blob_name as build_test_blob_name
 
 def setupDependencies(monkeypatch, minutes: int = 1):
     """Arrange and return the loaded `function_app` module with TEST_MODE enabled.
@@ -52,3 +55,38 @@ def test_test_mode_window_resets_on_reload(monkeypatch):
     assert fa2._TEST_MODE_START is not None
     assert fa2._TEST_MODE_EXPIRY is not None
     assert now2 <= fa2._TEST_MODE_EXPIRY
+
+
+def test_test_mode_uses_all_days_schedule(monkeypatch):
+    fa = setupDependencies(monkeypatch, minutes=5)
+
+    assert fa._live_schedule == "0 * * * * *"
+
+
+def test_daily_timer_runs_on_startup_in_test_mode(monkeypatch):
+    fa = setupDependencies(monkeypatch, minutes=5)
+    functions = {function.get_function_name(): function for function in fa.app.get_functions()}
+    daily_binding = functions["daily_job"].get_bindings_dict()["bindings"][0]
+
+    assert daily_binding["runOnStartup"] is True
+
+
+def test_option_chain_test_path_routes_to_test_container():
+    local_path = "/tmp/test_mode_data/market_data_cache/option_chain/underlying=NSE%3ANIFTY50-INDEX/part-0.parquet"
+    blob_name = "option_chain/underlying=NSE%3ANIFTY50-INDEX/part-0.parquet"
+
+    assert is_test_blob_path(local_path, is_local=False)
+    assert build_test_blob_name(blob_name) == "market_data_cache/option_chain/underlying=NSE%3ANIFTY50-INDEX/part-0.parquet"
+
+
+def test_test_mode_completion_logged_once(monkeypatch, caplog):
+    fa = setupDependencies(monkeypatch, minutes=5)
+    expired_at = fa._TEST_MODE_EXPIRY
+    now = expired_at + timedelta(seconds=1)
+
+    with caplog.at_level(logging.INFO):
+        assert not fa._is_test_mode_active(now)
+        assert not fa._is_test_mode_active(now + timedelta(minutes=1))
+
+    completion_logs = [record for record in caplog.records if "TEST_MODE window completed" in record.message]
+    assert len(completion_logs) == 1
