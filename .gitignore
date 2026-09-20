@@ -9,6 +9,7 @@ local_data/broker_tokens/
 # Ignore all local data/cache and local settings used for development/testing
 local_data/
 local.settings.json
+run_schedulers.py
 
 # Ignore local azure SDK stubs created for testing
 /azure/
