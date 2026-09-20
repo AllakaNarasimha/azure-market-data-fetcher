@@ -1,6 +1,5 @@
 setuptools
 wheel
-grpcio==1.54.0
 azure-functions
 azure-storage-blob
 azure-identity
