@@ -230,27 +230,23 @@ class InstrumentResolver:
         index_symbol = InstrumentResolver.INDEX_SYMBOLS.get(symbol.upper())
         if index_symbol:
             security_id = None
-            if "dhan" in PreferredBrokers.names():
-                try:
-                    security_id = DhanSecurityMaster().get_security_id(symbol, exchange, "INDEX")
-                except Exception:
-                    logger.exception("Failed to resolve Dhan security_id for index %s", symbol)
+            try:
+                security_id = DhanSecurityMaster().get_security_id(symbol, exchange, "INDEX")
+            except Exception:
+                logger.exception("Failed to resolve Dhan security_id for index %s", symbol)
             return Instrument(symbol=index_symbol, security_id=security_id, exchange_segment="IDX_I")
 
         fyers_symbol = symbol if ":" in symbol else f"{exchange}:{symbol}-EQ"
-        preferred = PreferredBrokers.names()
         security_id = None
-        if "dhan" in preferred:
-            try:
-                security_id = DhanSecurityMaster().get_security_id(symbol, exchange, instrument_name)
-            except Exception:
-                logger.exception("Failed to resolve Dhan security_id for %s", symbol)
-        if "fyers" in preferred:
-            try:
-                if not FyersSymbolMaster().validate_equity_symbol(fyers_symbol):
-                    logger.warning("Fyers symbol %s not found in NSE_CM master", fyers_symbol)
-            except Exception:
-                logger.exception("Failed to validate Fyers symbol %s", fyers_symbol)
+        try:
+            security_id = DhanSecurityMaster().get_security_id(symbol, exchange, instrument_name)
+        except Exception:
+            logger.exception("Failed to resolve Dhan security_id for %s", symbol)
+        try:
+            if not FyersSymbolMaster().validate_equity_symbol(fyers_symbol):
+                logger.warning("Fyers symbol %s not found in NSE_CM master", fyers_symbol)
+        except Exception:
+            logger.exception("Failed to validate Fyers symbol %s", fyers_symbol)
         return Instrument(symbol=fyers_symbol, security_id=security_id, exchange_segment=exchange_segment)
 
     @staticmethod
@@ -264,15 +260,14 @@ class InstrumentResolver:
     ) -> Instrument:
         """Build an option Instrument for both brokers from underlying/strike/option_type."""
         security_id = None
-        if "dhan" in PreferredBrokers.names():
-            try:
-                security_id = DhanSecurityMaster().get_option_security_id(
-                    underlying, strike, option_type, exchange, instrument_name, expiry_date
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to resolve Dhan option security_id for %s %s %s", underlying, strike, option_type
-                )
+        try:
+            security_id = DhanSecurityMaster().get_option_security_id(
+                underlying, strike, option_type, exchange, instrument_name, expiry_date
+            )
+        except Exception:
+            logger.exception(
+                "Failed to resolve Dhan option security_id for %s %s %s", underlying, strike, option_type
+            )
 
         fyers_symbol = None
         try:
