@@ -17,6 +17,7 @@ from azure.core.exceptions import ResourceExistsError
 from azure.storage.blob import BlobServiceClient, ContainerClient
 
 from cache_utils import is_test_blob_path, test_blob_name
+from env_config import EnvConfig
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ def is_running_locally() -> bool:
     on Linux Consumption, so use WEBSITE_SITE_NAME instead - it's always set
     by the App Service platform for any deployed Web/Function App.
     """
-    return os.getenv("WEBSITE_SITE_NAME") is None
+    return EnvConfig.website_site_name() is None
 
 
 class BlobUtils:
@@ -48,7 +49,7 @@ class BlobUtils:
         Returns None when no connection string is available (e.g. MARKET_STORAGE_CONNECTION
         isn't set), so callers can fall back to local/no-op behavior.
         """
-        conn_str = connection_string or os.getenv("MARKET_STORAGE_CONNECTION")
+        conn_str = connection_string or EnvConfig.market_storage_connection()
         if not conn_str:
             return None
 

@@ -11,7 +11,9 @@ import broker_data_manager as bdm
 from broker_authenticate import is_running_locally
 from parquet_cache_manager import ParquetCacheManager
 from market_data_cache import OptionChainCacheManager
+from market_times import MarketTimes
 from cache_utils import should_use_test_cache
+from env_config import EnvConfig
 
 # When running the module directly (not in Azure), load local.settings.json
 # into environment variables so values like TEST_MODE are available.
@@ -20,8 +22,8 @@ try:
         with open("local.settings.json", "r") as _f:
             _cfg = json.load(_f)
             for _k, _v in _cfg.get("Values", {}).items():
-                if os.getenv(_k) is None:
-                    os.environ[_k] = str(_v)
+                if EnvConfig.env(_k) is None:
+                    EnvConfig.set_override(_k, str(_v))
         logging.info("Loaded local.settings.json into environment for local run")
 except Exception:
     logging.exception("Failed to load local.settings.json into environment")
@@ -91,14 +93,18 @@ class LiveScheduler:
         is_local = is_running_locally()
         # Read env var for informational use, but only enable TEST_MODE behavior
         # while the startup window is active as determined by _is_test_mode_active().
-        _ = os.getenv("TEST_MODE", "false").strip().lower() == "true"
+        _ = EnvConfig.test_mode()
 
-        ist_tz = pytz.timezone('Asia/Kolkata')
+        ist_tz = pytz.timezone(MarketTimes.timezone())
         now = datetime.now(ist_tz)
         test_mode_active = _is_test_mode_active(now)
 
-        market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
-        market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        market_open = now.replace(
+            hour=MarketTimes.open().hour, minute=MarketTimes.open().minute, second=0, microsecond=0
+        )
+        market_close = now.replace(
+            hour=MarketTimes.close().hour, minute=MarketTimes.close().minute, second=0, microsecond=0
+        )
 
         use_test_cache, test_cache_root = should_use_test_cache(test_mode_active, now=now, is_holiday=MarketCalendar.is_holiday, is_local=is_local)
 
@@ -113,7 +119,7 @@ class LiveScheduler:
 
         logging.info(f"=== Fetching Option Chains (Local Mode: {is_local}) ===")
 
-        option_chain_symbols = [s.strip() for s in os.getenv("OPTION_CHAIN_SYMBOLS", "").split(",") if s.strip()]
+        option_chain_symbols = EnvConfig.option_chain_symbols()
         if use_test_cache:
             chain_cache = OptionChainCacheManager(cache_dir=test_cache_root)
             logging.info(f"TEST_MODE after-hours: writing cache to %s", test_cache_root)
@@ -147,40 +153,17 @@ class LiveScheduler:
             logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to fetch expiries")
             return
 
-        # Collect all weekly/monthly chain responses and persist them in a single
-        # write per symbol instead of once per expiry - avoids repeatedly reading,
-        # deduping, rewriting, and re-uploading the same growing day-partition file.
-        responses = []
+        # Resolve a deduplicated, sorted list of expiries for up to `weeks` and `months`
+        expiry_list = bdm.ExpiryResolver.resolve_range(expiries, weeks=self.weeks, months=self.months)
 
-        for week in range(self.weeks):
+        responses: list[tuple] = []
+        for expiry_ts in expiry_list:
             try:
-                expiry_ts = bdm.ExpiryResolver.resolve(expiries, weekly_expiry_count=week)
-            except bdm.ExpiryNotAvailable:
-                logging.info(f"[LiveScheduler] {instrument.symbol} ({broker_name}) only {week} weekly expiries available")
-                break
-            try:
-                chain = manager.get_option_chain(
-                    instrument, strikecount=self.strikecount, weekly_expiry_count=week, expiries=expiries
-                )
+                chain = manager.get_option_chain(instrument, strikecount=self.strikecount, expiries=expiry_ts)
                 responses.append((chain, expiry_ts))
-                logging.info(f"[LiveScheduler] {instrument.symbol} ({broker_name}) weekly+{week} option chain fetched")
+                logging.info(f"[LiveScheduler] {instrument.symbol} ({broker_name}) option chain fetched for expiry {expiry_ts}")
             except Exception:
-                logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) weekly+{week} option chain fetch failed")
-
-        for month in range(self.months):
-            try:
-                expiry_ts = bdm.ExpiryResolver.resolve(expiries, monthly_expiry_count=month)
-            except bdm.ExpiryNotAvailable:
-                logging.info(f"[LiveScheduler] {instrument.symbol} ({broker_name}) only {month} monthly expiries available")
-                break
-            try:
-                chain = manager.get_option_chain(
-                    instrument, strikecount=self.strikecount, monthly_expiry_count=month, expiries=expiries
-                )
-                responses.append((chain, expiry_ts))
-                logging.info(f"[LiveScheduler] {instrument.symbol} ({broker_name}) monthly+{month} option chain fetched")
-            except Exception:
-                logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) monthly+{month} option chain fetch failed")
+                logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) option chain fetch failed for expiry {expiry_ts}")
 
         if responses:
             try:
@@ -202,13 +185,17 @@ class DailyScheduler:
 
     def run(self) -> None:
         is_local = is_running_locally()
-        _ = os.getenv("TEST_MODE", "false").strip().lower() == "true"
-        ist_tz = pytz.timezone('Asia/Kolkata')
+        _ = EnvConfig.test_mode()
+        ist_tz = pytz.timezone(MarketTimes.timezone())
         now = datetime.now(ist_tz)
         test_mode_active = _is_test_mode_active(now)
 
-        market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
-        market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        market_open = now.replace(
+            hour=MarketTimes.open().hour, minute=MarketTimes.open().minute, second=0, microsecond=0
+        )
+        market_close = now.replace(
+            hour=MarketTimes.close().hour, minute=MarketTimes.close().minute, second=0, microsecond=0
+        )
 
         use_test_cache, test_cache_root = should_use_test_cache(test_mode_active, now=now, is_holiday=MarketCalendar.is_holiday, is_local=is_local)
 
@@ -216,8 +203,8 @@ class DailyScheduler:
             logging.info("Market is closed or holiday. Skipping daily job.")
             return
 
-        symbols = [s.strip() for s in os.getenv("WATCHLIST_SYMBOLS", "SBIN").split(",") if s.strip()]
-        option_chain_symbols = [s.strip() for s in os.getenv("OPTION_CHAIN_SYMBOLS", "").split(",") if s.strip()]
+        symbols = EnvConfig.watchlist_symbols()
+        option_chain_symbols = EnvConfig.option_chain_symbols()
         if use_test_cache:
             candle_cache = ParquetCacheManager(cache_dir=test_cache_root)
             chain_cache = OptionChainCacheManager(cache_dir=test_cache_root)
@@ -292,14 +279,14 @@ class DailyScheduler:
 # module import time - the Functions worker imports this module to index
 # functions, and synchronous broker/network calls during that phase crash
 # the host with "Value cannot be null. (Parameter 'provider')".
-_test_mode = os.getenv("TEST_MODE", "false").strip().lower() == "true"
-logging.info(f"Startup env: TEST_MODE={os.getenv('TEST_MODE')!r}, WEBSITE_SITE_NAME={os.getenv('WEBSITE_SITE_NAME')!r}")
+_test_mode = EnvConfig.test_mode()
+logging.info(f"Startup env: TEST_MODE={EnvConfig.env('TEST_MODE')!r}, WEBSITE_SITE_NAME={EnvConfig.website_site_name()!r}")
 # Establish a short lived TEST_MODE window at process start.
 # When TEST_MODE is enabled we allow scheduler runs for a fixed window
 # (default 10 minutes) starting at module import (i.e., host start).
-IST_TZ = pytz.timezone('Asia/Kolkata')
-_test_mode_env = os.getenv("TEST_MODE", "false").strip().lower() == "true"
-_test_mode_minutes = int(os.getenv("TEST_MODE_MINUTES", "10"))
+IST_TZ = pytz.timezone(MarketTimes.timezone())
+_test_mode_env = EnvConfig.test_mode()
+_test_mode_minutes = EnvConfig.test_mode_minutes()
 _TEST_MODE_START = None
 _TEST_MODE_EXPIRY = None
 if _test_mode_env:
@@ -316,13 +303,13 @@ def _is_test_mode_active(now: datetime) -> bool:
         return False
     return now <= _TEST_MODE_EXPIRY
 
-
+# Live job runs at every minute of every hour
 @app.schedule(schedule="0 * * * * 1-5", arg_name="mytimer", run_on_startup=_test_mode_env, use_monitor=False)
 def market_data_fetcher(mytimer: func.TimerRequest) -> None:
     LiveScheduler().run()
 
-
-@app.schedule(schedule="0 30 8 * * 1-5", arg_name="dailyTimer", run_on_startup=_test_mode_env, use_monitor=False)
+# Daily job runs at 8:30 AM IST on weekdays
+@app.schedule(schedule="0 0 3 * * 1-5", arg_name="dailyTimer", run_on_startup=_test_mode_env, use_monitor=False)
 def daily_job(dailyTimer: func.TimerRequest) -> None:
     DailyScheduler().run()
 

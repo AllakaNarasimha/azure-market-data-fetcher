@@ -19,6 +19,7 @@ from dhanhq import DhanContext, DhanLogin, dhanhq
 from fyers_apiv3 import fyersModel
 
 from blob_utils import BlobUtils, is_running_locally
+from env_config import EnvConfig
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class ConfigStore:
 
     def __init__(self):
         self.is_local = is_running_locally()
-        self.key_vault_url = os.getenv("KEY_VAULT_URL")
+        self.key_vault_url = EnvConfig.key_vault_url()
         # When running locally, ensure values from local.settings.json are
         # loaded into the process environment so standalone scripts (or
         # modules run directly) can read config via os.getenv.
@@ -42,7 +43,7 @@ class ConfigStore:
                 logger.exception("Failed to load local.settings.json into environment")
 
     def load(self, env_var: str) -> dict:
-        raw = os.getenv(env_var)
+        raw = EnvConfig.env(env_var)
         if not raw:
             raise RuntimeError(f"{env_var} is not configured")
         try:
@@ -144,7 +145,7 @@ class BrokerConfig:
             # If absent/empty and a mapping exists, try the mapped env var
             if (value is None or value == "") and field in mapping:
                 mapped_env = mapping[field]
-                env_val = os.getenv(mapped_env)
+                env_val = EnvConfig.env(mapped_env)
                 if env_val is not None:
                     value = env_val
             setattr(self, field, value)

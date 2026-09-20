@@ -13,6 +13,8 @@ import pyarrow.parquet as pq
 from broker_authenticate import is_running_locally
 from blob_utils import BlobSync
 
+from market_times import MarketTimes
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,10 +30,11 @@ def _local_cache_root(subdir: str) -> str:
 # =====================================================================
 
 class CacheConstants:
-    MARKET_TIMEZONE = "Asia/Kolkata"
-    MARKET_OPEN = time(9, 15)
-    MARKET_CLOSE = time(15, 30)
-    
+    # Backwards compatible constants sourced from `market_times` module.
+    # Keep legacy constant names but source them from MarketTimes where helpful
+    MARKET_TIMEZONE = MarketTimes.TIMEZONE
+    MARKET_OPEN = MarketTimes.OPEN
+    MARKET_CLOSE = MarketTimes.CLOSE
     CACHE_DIR = "market_data_cache"
     REGISTRY_FILENAME = "market_off_registry.parquet"
     FORMAT = "parquet"
