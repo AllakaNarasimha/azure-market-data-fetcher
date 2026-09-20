@@ -1,4 +1,6 @@
 import os
+import logging
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 
@@ -13,6 +15,11 @@ class EnvConfig:
     """
 
     _overrides: dict = {}
+    # TEST_MODE window tracking (initialized on first call)
+    _test_mode_initialized: bool = False
+    _TEST_MODE_START: Optional[datetime] = None
+    _TEST_MODE_EXPIRY: Optional[datetime] = None
+    _test_mode_completed_logged: bool = False
 
     @classmethod
     def set_override(cls, key: str, value: Optional[str]) -> None:
@@ -69,3 +76,48 @@ class EnvConfig:
     @classmethod
     def key_vault_url(cls) -> Optional[str]:
         return cls.env("KEY_VAULT_URL")
+
+    @classmethod
+    def init_test_mode_window(cls, now: datetime) -> None:
+        """Initialize a short-lived TEST_MODE startup window at `now`.
+
+        This is idempotent and safe to call multiple times; the window is
+        established only once per process.
+        """
+        if not cls.test_mode():
+            return
+        # Always (re)initialize the test-mode window when requested. Tests
+        # reload the module but `EnvConfig` lives in a separate module and
+        # retains class state across reloads; resetting here ensures tests
+        # get a fresh window and that the "completed" log flag is cleared.
+        minutes = cls.test_mode_minutes()
+        cls._TEST_MODE_START = now
+        cls._TEST_MODE_EXPIRY = now + timedelta(minutes=minutes)
+        cls._test_mode_initialized = True
+        cls._test_mode_completed_logged = False
+        logging.info("TEST_MODE enabled: running for %s minutes until %s", minutes, cls._TEST_MODE_EXPIRY.isoformat())
+
+    @classmethod
+    def is_test_mode_active(cls, now: datetime) -> bool:
+        """Return True when TEST_MODE is enabled and still within the startup window.
+
+        Mirrors the previous module-level `_is_test_mode_active` behaviour but
+        keeps state inside `EnvConfig` so callers can remain lightweight.
+        """
+        if not cls.test_mode():
+            return False
+        if cls._TEST_MODE_EXPIRY is None:
+            return False
+        if now <= cls._TEST_MODE_EXPIRY:
+            return True
+        if not cls._test_mode_completed_logged:
+            logging.info(
+                "TEST_MODE window completed: ran for %s minutes, expired at %s",
+                cls.test_mode_minutes(), cls._TEST_MODE_EXPIRY.isoformat(),
+            )
+            cls._test_mode_completed_logged = True
+        return False
+
+    @classmethod
+    def get_test_mode_expiry(cls) -> Optional[datetime]:
+        return cls._TEST_MODE_EXPIRY

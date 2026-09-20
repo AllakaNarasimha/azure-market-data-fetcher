@@ -33,16 +33,18 @@ def test_test_mode_window_resets_on_reload(monkeypatch):
 
     # Assert: startup window exists and includes 'now'
     ist_now = datetime.now(fa.IST_TZ)
-    assert fa._TEST_MODE_START is not None
-    assert fa._TEST_MODE_EXPIRY is not None
+    # Use EnvConfig-backed test-mode window state (keeps tests independent
+    # of module-level implementation details).
+    assert fa.EnvConfig._TEST_MODE_START is not None
+    assert fa.EnvConfig.get_test_mode_expiry() is not None
     # The startup start should be <= now <= expiry
-    assert fa._TEST_MODE_START <= ist_now <= fa._TEST_MODE_EXPIRY
+    assert fa.EnvConfig._TEST_MODE_START <= ist_now <= fa.EnvConfig.get_test_mode_expiry()
 
     # Act: simulate expiry by moving expiry to 1 second after start
-    fa._TEST_MODE_EXPIRY = fa._TEST_MODE_START + timedelta(seconds=1)
+    fa.EnvConfig._TEST_MODE_EXPIRY = fa.EnvConfig._TEST_MODE_START + timedelta(seconds=1)
     # Assert: simulated time after expiry returns inactive
-    sim_now = fa._TEST_MODE_START + timedelta(seconds=2)
-    assert not fa._is_test_mode_active(sim_now)
+    sim_now = fa.EnvConfig._TEST_MODE_START + timedelta(seconds=2)
+    assert not fa.EnvConfig.is_test_mode_active(sim_now)
 
     # Act: simulate host restart (reload module)
     if "function_app" in sys.modules:
@@ -52,9 +54,9 @@ def test_test_mode_window_resets_on_reload(monkeypatch):
 
     # Assert: after reload the TEST_MODE window is reset into the future
     now2 = datetime.now(fa2.IST_TZ)
-    assert fa2._TEST_MODE_START is not None
-    assert fa2._TEST_MODE_EXPIRY is not None
-    assert now2 <= fa2._TEST_MODE_EXPIRY
+    assert fa2.EnvConfig._TEST_MODE_START is not None
+    assert fa2.EnvConfig.get_test_mode_expiry() is not None
+    assert now2 <= fa2.EnvConfig.get_test_mode_expiry()
 
 
 def test_test_mode_uses_all_days_schedule(monkeypatch):
@@ -71,22 +73,23 @@ def test_daily_timer_runs_on_startup_in_test_mode(monkeypatch):
     assert daily_binding["runOnStartup"] is True
 
 
-def test_option_chain_test_path_routes_to_test_container():
+def test_option_chain_test_path_routes_to_test_container(monkeypatch):
     local_path = "/tmp/test_mode_data/market_data_cache/option_chain/underlying=NSE%3ANIFTY50-INDEX/part-0.parquet"
     blob_name = "option_chain/underlying=NSE%3ANIFTY50-INDEX/part-0.parquet"
-
+    # Ensure TEST_MODE is enabled for this check
+    monkeypatch.setenv("TEST_MODE", "true")
     assert is_test_blob_path(local_path, is_local=False)
     assert build_test_blob_name(blob_name) == "market_data_cache/option_chain/underlying=NSE%3ANIFTY50-INDEX/part-0.parquet"
 
 
 def test_test_mode_completion_logged_once(monkeypatch, caplog):
     fa = setupDependencies(monkeypatch, minutes=5)
-    expired_at = fa._TEST_MODE_EXPIRY
+    expired_at = fa.EnvConfig.get_test_mode_expiry()
     now = expired_at + timedelta(seconds=1)
 
     with caplog.at_level(logging.INFO):
-        assert not fa._is_test_mode_active(now)
-        assert not fa._is_test_mode_active(now + timedelta(minutes=1))
+        assert not fa.EnvConfig.is_test_mode_active(now)
+        assert not fa.EnvConfig.is_test_mode_active(now + timedelta(minutes=1))
 
     completion_logs = [record for record in caplog.records if "TEST_MODE window completed" in record.message]
     assert len(completion_logs) == 1
