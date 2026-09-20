@@ -36,13 +36,20 @@ class MasterFileCache:
             self._container_client = BlobUtils.get_container_client(self.CONTAINER)
 
     def get(self, filename: str, download_url: str) -> bytes:
+        # Store master files under a date-specific subfolder so each day has
+        # its own copy (DDMMYYYY). This makes it simple to ensure a once-a-day
+        # download and avoids checking mtimes.
+        today_folder = datetime.now().strftime("%d%m%Y")
         if self.is_local:
-            self.local_dir.mkdir(parents=True, exist_ok=True)
-            path = self.local_dir / filename
-            if not path.exists():
-                resp = requests.get(download_url, timeout=30)
-                resp.raise_for_status()
-                path.write_bytes(resp.content)
+            dated_dir = self.local_dir / today_folder
+            dated_dir.mkdir(parents=True, exist_ok=True)
+            path = dated_dir / filename
+            if path.exists():
+                return path.read_bytes()
+
+            resp = requests.get(download_url, timeout=30)
+            resp.raise_for_status()
+            path.write_bytes(resp.content)
             return path.read_bytes()
 
         if not self._container_client:
@@ -51,13 +58,24 @@ class MasterFileCache:
             resp.raise_for_status()
             return resp.content
 
-        blob = self._container_client.get_blob_client(filename)
-        if blob.exists():
-            return blob.download_blob().readall()
-        resp = requests.get(download_url, timeout=30)
-        resp.raise_for_status()
-        blob.upload_blob(resp.content, overwrite=True)
-        return resp.content
+        # For blob storage, use a dated blob path so each day's file is stored
+        # under a DDMMYYYY prefix. This mirrors the local-folder behavior.
+        blob_path = f"{today_folder}/{filename}"
+        blob = self._container_client.get_blob_client(blob_path)
+        try:
+            if blob.exists():
+                return blob.download_blob().readall()
+
+            resp = requests.get(download_url, timeout=30)
+            resp.raise_for_status()
+            # Upload into the dated blob path
+            blob.upload_blob(resp.content, overwrite=True)
+            return resp.content
+        except Exception:
+            # As a last resort, fetch directly from the URL
+            resp = requests.get(download_url, timeout=30)
+            resp.raise_for_status()
+            return resp.content
 
 
 class DhanSecurityMaster:
@@ -343,8 +361,29 @@ class ExpiryResolver:
                     "expiry_flag": "M" if is_last_of_month else "W",
                 }
             )
-        return result
+        return result    
+    
+    @staticmethod
+    def resolve_range(expiries: list[dict], weeks: int = 0, months: int = 0) -> list[str]:
+        candidates: list[str] = []
 
+        for week in range(weeks):
+            try:
+                ts = ExpiryResolver.resolve(expiries, weekly_expiry_count=week)
+            except ExpiryNotAvailable:
+                break
+            candidates.append(ts)
+
+        for month in range(months):
+            try:
+                ts = ExpiryResolver.resolve(expiries, monthly_expiry_count=month)
+            except ExpiryNotAvailable:
+                break
+            candidates.append(ts)
+
+        # Deduplicate by numeric value and return sorted epoch-strings
+        unique_sorted = sorted({int(ts): str(ts) for ts in candidates}.items())
+        return [val for _, val in unique_sorted]
 
 class IDataManager:
     def get_price(self, instrument: Instrument) -> dict:
@@ -362,9 +401,7 @@ class IDataManager:
         self,
         instrument: Instrument,
         strikecount: int = 1,
-        weekly_expiry_count: Optional[int] = None,
-        monthly_expiry_count: Optional[int] = None,
-        expiries: Optional[list[dict]] = None,
+        expiries: Optional[str] = None,
     ) -> dict:
         raise NotImplementedError()
 
@@ -422,18 +459,18 @@ class DhanDataManager(IDataManager):
         self,
         instrument: Instrument,
         strikecount: int = 1,
-        weekly_expiry_count: Optional[int] = None,
-        monthly_expiry_count: Optional[int] = None,
-        expiries: Optional[list[dict]] = None,
+        expiries: Optional[str] = None,
     ) -> dict:
+        """Fetch option chain for `instrument`.
+
+        Caller should resolve an expiry timestamp (e.g. via
+        `ExpiryResolver.resolve(classified_expiries, ...)`) and pass it here
+        as `expiries`. If `expiries` is None or empty the broker API will be
+        requested without an expiry filter.
+        """
         sec_id = self._security_id(instrument)
-        expiry = ""
-        if weekly_expiry_count is not None or monthly_expiry_count is not None:
-            if expiries is None:
-                expiries = ExpiryResolver.classify_dates(self.get_expiry_dates(instrument))
-            expiry = ExpiryResolver.resolve(expiries, weekly_expiry_count, monthly_expiry_count)
         return self._get_client().option_chain(
-            under_security_id=sec_id, under_exchange_segment="NSE_FNO", expiry=expiry
+            under_security_id=sec_id, under_exchange_segment="NSE_FNO", expiry=expiries or ""
         )
 
     def get_expiry_dates(self, instrument: Instrument) -> list[str]:
@@ -479,15 +516,15 @@ class FyersDataManager(IDataManager):
         self,
         instrument: Instrument,
         strikecount: int = 1,
-        weekly_expiry_count: Optional[int] = None,
-        monthly_expiry_count: Optional[int] = None,
-        expiries: Optional[list[dict]] = None,
+        expiries: Optional[str] = None,
     ) -> dict:
-        timestamp = ""
-        if weekly_expiry_count is not None or monthly_expiry_count is not None:
-            if expiries is None:
-                expiries = self.get_expiries(instrument)
-            timestamp = ExpiryResolver.resolve(expiries, weekly_expiry_count, monthly_expiry_count)
+        """Fetch option chain for `instrument`.
+
+        Caller should pass a resolved expiry timestamp via `expiries`. If
+        `expiries` is None or empty the broker API will be requested without a
+        timestamp filter.
+        """
+        timestamp = expiries or ""
         return self._get_client().optionchain(
             {"symbol": instrument.symbol, "strikecount": strikecount, "timestamp": timestamp}
         )
@@ -551,7 +588,9 @@ class PreferredBrokers:
 
     @staticmethod
     def names() -> list[str]:
-        raw = os.getenv("PREFER_BROKERS", "Dhan,Fyers")
+        # Use EnvConfig to allow tests to override broker preferences
+        from env_config import EnvConfig
+        raw = EnvConfig.env("PREFER_BROKERS", "Dhan,Fyers") or "Dhan,Fyers"
         return [b.strip().lower() for b in raw.split(",") if b.strip()]
 
     @classmethod
@@ -587,7 +626,36 @@ def main() -> None:
             logger.error("%s history fetch failed: %s", name.capitalize(), e)
 
         try:
-            chain = manager.get_option_chain(instrument, strikecount=10, weekly_expiry_count=6, monthly_expiry_count=3)
+            # If the manager requires expiries for weekly/monthly selectors, pre-fetch them.
+            expiries = None
+            if hasattr(manager, "get_expiries"):
+                try:
+                    expiries = manager.get_expiries(instrument)
+                except Exception:
+                    expiries = None
+            elif hasattr(manager, "get_expiry_dates"):
+                try:
+                    expiries = ExpiryResolver.classify_dates(manager.get_expiry_dates(instrument))
+                except Exception:
+                    expiries = None
+
+            # Caller resolves a concrete expiry timestamp and passes it to the
+            # manager.get_option_chain() method. This avoids brokers doing an
+            # extra expiry-fetch internally.
+            expiry_ts = None
+            try:
+                if expiries:
+                    # Example selection: choose the 6th weekly and 3rd monthly if available.
+                    # Monthly takes precedence; fallback to weekly when monthly not available.
+                    try:
+                        expiry_ts = ExpiryResolver.resolve(expiries, weekly_expiry_count=6, monthly_expiry_count=3)
+                    except Exception:
+                        # Try weekly-only selection as a fallback
+                        expiry_ts = ExpiryResolver.resolve(expiries, weekly_expiry_count=6, monthly_expiry_count=None)
+            except Exception:
+                expiry_ts = None
+
+            chain = manager.get_option_chain(instrument, strikecount=10, expiries=expiry_ts)
             logger.info("%s option chain for SBIN: %s", name.capitalize(), chain)
         except Exception as e:
             logger.error("%s option chain fetch failed: %s", name.capitalize(), e)
