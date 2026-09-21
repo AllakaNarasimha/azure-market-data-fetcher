@@ -1,6 +1,8 @@
+from dataclasses import dataclass
 import os
 import json
 import logging
+from typing import Optional
 import pytz
 from datetime import datetime, timedelta
 import pandas as pd
@@ -29,6 +31,12 @@ except Exception:
     logging.exception("Failed to load local.settings.json into environment")
 
 app = func.FunctionApp()
+
+IST_TZ = pytz.timezone(MarketTimes.timezone())
+IS_RUNNING_LOCALLY_AT_START = is_running_locally()
+MARKET_OPEN_TIME = MarketTimes.open()
+MARKET_CLOSE_TIME = MarketTimes.close()
+EXPIRIES_CACHE: dict[tuple[str, str, str], list] = {}
 
 
 class MarketCalendar:
@@ -78,6 +86,29 @@ class MarketCalendar:
             return True
         return check_date.strftime("%Y-%m-%d") in MarketCalendar.NSE_HOLIDAYS
 
+
+# Shared helper for scheduler functions to avoid duplicated time-window logic
+@dataclass
+class SchedulerContext:
+    now: datetime
+    test_mode_active: bool
+    use_test_cache: bool
+    test_cache_root: Optional[str]   
+
+
+def _build_scheduler_context() -> SchedulerContext:
+    """Build a consistent scheduler context used by both schedulers."""
+    # Build a small, run-specific context. Static values (timezone, market
+    # open/close hour) are hoisted to module-level constants.
+    now = datetime.now(IST_TZ)
+    test_mode_active = EnvConfig.is_test_mode_active(now)
+
+    use_test_cache, test_cache_root = should_use_test_cache(
+        test_mode_active, now=now, is_holiday=MarketCalendar.is_holiday, is_local=IS_RUNNING_LOCALLY_AT_START
+    )
+
+    return SchedulerContext(now=now, test_mode_active=test_mode_active, use_test_cache=use_test_cache, test_cache_root=test_cache_root)
+
 # ---------------------------------------------------------
 # MAIN: The Core Logic
 # ---------------------------------------------------------
@@ -90,43 +121,35 @@ class LiveScheduler:
         self.months = months
 
     def run(self) -> None:
-        is_local = is_running_locally()
-        # Read env var for informational use, but only enable TEST_MODE behavior
-        # while the startup window is active as determined by _is_test_mode_active().
-        _ = EnvConfig.test_mode()
-
-        ist_tz = pytz.timezone(MarketTimes.timezone())
-        now = datetime.now(ist_tz)
-        test_mode_active = _is_test_mode_active(now)
-
-        market_open = now.replace(
-            hour=MarketTimes.open().hour, minute=MarketTimes.open().minute, second=0, microsecond=0
-        )
-        market_close = now.replace(
-            hour=MarketTimes.close().hour, minute=MarketTimes.close().minute, second=0, microsecond=0
-        )
-
-        use_test_cache, test_cache_root = should_use_test_cache(test_mode_active, now=now, is_holiday=MarketCalendar.is_holiday, is_local=is_local)
+        ctx = _build_scheduler_context()
 
         # Only allow scheduler execution when within market hours OR when the
         # TEST_MODE startup window is active. After the window expires, TEST_MODE
         # behavior will not permit runs outside market hours.
-        if not use_test_cache and not (test_mode_active or (market_open <= now <= market_close) and not MarketCalendar.is_holiday(now)):
+        market_open = ctx.now.replace(
+            hour=MARKET_OPEN_TIME.hour, minute=MARKET_OPEN_TIME.minute, second=0, microsecond=0
+        )
+        market_close = ctx.now.replace(
+            hour=MARKET_CLOSE_TIME.hour, minute=MARKET_CLOSE_TIME.minute, second=0, microsecond=0
+        )
+
+        if not ctx.use_test_cache and not (
+            ctx.test_mode_active or (market_open <= ctx.now <= market_close) and not MarketCalendar.is_holiday(ctx.now)
+        ):
             # If not in test-mode and market is closed/holiday, skip.
             # The above condition preserves prior behavior when test_mode is False.
             logging.info("Market is closed or holiday. Skipping.")
             return
 
-        logging.info(f"=== Fetching Option Chains (Local Mode: {is_local}) ===")
+        logging.info(f"=== Fetching Option Chains (Local Mode: {IS_RUNNING_LOCALLY_AT_START}) ===")
 
-        option_chain_symbols = EnvConfig.option_chain_symbols()
-        if use_test_cache:
-            chain_cache = OptionChainCacheManager(cache_dir=test_cache_root)
-            logging.info(f"TEST_MODE after-hours: writing cache to %s", test_cache_root)
+        if ctx.use_test_cache:
+            chain_cache = OptionChainCacheManager(cache_dir=ctx.test_cache_root)
+            logging.info(f"TEST_MODE after-hours: writing cache to %s", ctx.test_cache_root)
         else:
             chain_cache = OptionChainCacheManager()
 
-        for symbol in option_chain_symbols:
+        for symbol in OPTION_CHAIN_SYMBOLS:
             try:
                 instrument = bdm.InstrumentResolver.resolve(symbol)
             except Exception:
@@ -147,11 +170,16 @@ class LiveScheduler:
         return []
 
     def _fetch_option_chain_range(self, manager, broker_name, instrument, chain_cache) -> None:
-        try:
-            expiries = self._expiries_for(manager, broker_name, instrument)
-        except Exception:
-            logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to fetch expiries")
-            return
+        today = datetime.now(IST_TZ).strftime("%Y-%m-%d")
+        cache_key = (broker_name, instrument.symbol, today)
+        expiries = EXPIRIES_CACHE.get(cache_key)
+        if expiries is None:
+            try:
+                expiries = self._expiries_for(manager, broker_name, instrument) or []
+                EXPIRIES_CACHE[cache_key] = expiries
+            except Exception:
+                logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to fetch expiries")
+                return
 
         # Resolve a deduplicated, sorted list of expiries for up to `weeks` and `months`
         expiry_list = bdm.ExpiryResolver.resolve_range(expiries, weeks=self.weeks, months=self.months)
@@ -176,7 +204,6 @@ class LiveScheduler:
                 logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to save batched option chain")
 
 
-
 class DailyScheduler:
     """Daily job: backfill last N-days history + snapshot option chains for the watchlist."""
 
@@ -184,31 +211,28 @@ class DailyScheduler:
         self.history_days = history_days
 
     def run(self) -> None:
-        is_local = is_running_locally()
-        _ = EnvConfig.test_mode()
-        ist_tz = pytz.timezone(MarketTimes.timezone())
-        now = datetime.now(ist_tz)
-        test_mode_active = _is_test_mode_active(now)
+        ctx = _build_scheduler_context()
 
-        market_open = now.replace(
-            hour=MarketTimes.open().hour, minute=MarketTimes.open().minute, second=0, microsecond=0
+        market_open = ctx.now.replace(
+            hour=MARKET_OPEN_TIME.hour, minute=MARKET_OPEN_TIME.minute, second=0, microsecond=0
         )
-        market_close = now.replace(
-            hour=MarketTimes.close().hour, minute=MarketTimes.close().minute, second=0, microsecond=0
+        market_close = ctx.now.replace(
+            hour=MARKET_CLOSE_TIME.hour, minute=MARKET_CLOSE_TIME.minute, second=0, microsecond=0
         )
 
-        use_test_cache, test_cache_root = should_use_test_cache(test_mode_active, now=now, is_holiday=MarketCalendar.is_holiday, is_local=is_local)
-
-        if not use_test_cache and not (test_mode_active or (market_open <= now <= market_close) and not MarketCalendar.is_holiday(now)):
+        if not ctx.use_test_cache and not (
+            ctx.test_mode_active or (market_open <= ctx.now <= market_close) and not MarketCalendar.is_holiday(ctx.now)
+        ):
             logging.info("Market is closed or holiday. Skipping daily job.")
             return
 
-        symbols = EnvConfig.watchlist_symbols()
-        option_chain_symbols = EnvConfig.option_chain_symbols()
-        if use_test_cache:
-            candle_cache = ParquetCacheManager(cache_dir=test_cache_root)
-            chain_cache = OptionChainCacheManager(cache_dir=test_cache_root)
-            logging.info(f"TEST_MODE after-hours: writing daily cache to %s", test_cache_root)
+        symbols = WATCHLIST_SYMBOLS
+        option_chain_symbols = OPTION_CHAIN_SYMBOLS
+        
+        if ctx.use_test_cache:
+            candle_cache = ParquetCacheManager(cache_dir=ctx.test_cache_root)
+            chain_cache = OptionChainCacheManager(cache_dir=ctx.test_cache_root)
+            logging.info(f"TEST_MODE after-hours: writing daily cache to %s", ctx.test_cache_root)
         else:
             candle_cache = ParquetCacheManager()
             chain_cache = OptionChainCacheManager()
@@ -233,6 +257,18 @@ class DailyScheduler:
                 continue
 
             for broker_name, manager in bdm.PreferredBrokers.managers().items():
+                try:
+                    today = datetime.now(IST_TZ).strftime("%Y-%m-%d")
+                    cache_key = (broker_name, instrument.symbol, today)
+                    expiries = LiveScheduler._expiries_for(manager, broker_name, instrument) or []
+                    EXPIRIES_CACHE[cache_key] = expiries
+                    if not expiries:
+                        logging.warning(
+                            f"[DailyScheduler] {instrument.symbol} ({broker_name}) expiries not resolved during pre-market prefetch; running here and LiveScheduler will fetch on demand"
+                        )
+                except Exception:
+                    logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) failed to prefetch expiries")
+
                 self._fetch_option_chain(manager, broker_name, instrument, chain_cache)
 
         logging.info("=== Daily Job Completed ===")
@@ -274,53 +310,23 @@ class DailyScheduler:
         except Exception:
             logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) option chain fetch failed")
 
-# TEST_MODE runs both schedulers once when the host starts, via the SDK's
-# supported run_on_startup mechanism. Do NOT execute scheduler logic at
-# module import time - the Functions worker imports this module to index
-# functions, and synchronous broker/network calls during that phase crash
-# the host with "Value cannot be null. (Parameter 'provider')".
-_test_mode = EnvConfig.test_mode()
 logging.info(f"Startup env: TEST_MODE={EnvConfig.env('TEST_MODE')!r}, WEBSITE_SITE_NAME={EnvConfig.website_site_name()!r}")
-# Establish a short lived TEST_MODE window at process start.
-# When TEST_MODE is enabled we allow scheduler runs for a fixed window
-# (default 5 minutes) starting at module import (i.e., host start).
-IST_TZ = pytz.timezone(MarketTimes.timezone())
-_test_mode_env = EnvConfig.test_mode()
-_test_mode_minutes = EnvConfig.test_mode_minutes()
-_TEST_MODE_START = None
-_TEST_MODE_EXPIRY = None
-_test_mode_completed_logged = False
-if _test_mode_env:
-    _TEST_MODE_START = datetime.now(IST_TZ)
-    _TEST_MODE_EXPIRY = _TEST_MODE_START + timedelta(minutes=_test_mode_minutes)
-    logging.info("TEST_MODE enabled: running for %s minutes until %s", _test_mode_minutes, _TEST_MODE_EXPIRY.isoformat())
+# Initialize a short-lived TEST_MODE window at process start (if enabled).
+if EnvConfig.test_mode():
+    IST_TZ = pytz.timezone(MarketTimes.timezone())
+    EnvConfig.init_test_mode_window(datetime.now(IST_TZ))
 
-
-def _is_test_mode_active(now: datetime) -> bool:
-    """Return True when TEST_MODE is enabled and still within the startup window."""
-    global _test_mode_completed_logged
-    if not _test_mode_env:
-        return False
-    if _TEST_MODE_EXPIRY is None:
-        return False
-    if now <= _TEST_MODE_EXPIRY:
-        return True
-    if not _test_mode_completed_logged:
-        logging.info(
-            "TEST_MODE window completed: ran for %s minutes, expired at %s",
-            _test_mode_minutes, _TEST_MODE_EXPIRY.isoformat(),
-        )
-        _test_mode_completed_logged = True
-    return False
+OPTION_CHAIN_SYMBOLS = EnvConfig.option_chain_symbols()
+WATCHLIST_SYMBOLS = EnvConfig.watchlist_symbols()
 
 # TEST_MODE must tick on weekends so the five-minute window can close and log completion.
-_live_schedule = "0 * * * * *" if _test_mode_env else "0 * * * * 1-5"
-@app.schedule(schedule=_live_schedule, arg_name="mytimer", run_on_startup=_test_mode_env, use_monitor=False)
+_live_schedule = "0 * * * * *" if EnvConfig.test_mode() else "0 * * * * 1-5"
+@app.schedule(schedule=_live_schedule, arg_name="mytimer", run_on_startup=EnvConfig.test_mode(), use_monitor=False)
 def market_data_fetcher(mytimer: func.TimerRequest) -> None:
     LiveScheduler().run()
 
 # Daily job runs at 8:30 AM IST on weekdays
-@app.schedule(schedule="0 0 3 * * 1-5", arg_name="dailyTimer", run_on_startup=_test_mode_env, use_monitor=False)
+@app.schedule(schedule="0 0 3 * * 1-5", arg_name="dailyTimer", run_on_startup=EnvConfig.test_mode(), use_monitor=False)
 def daily_job(dailyTimer: func.TimerRequest) -> None:
     DailyScheduler().run()
 
