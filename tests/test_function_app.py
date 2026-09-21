@@ -93,3 +93,62 @@ def test_test_mode_completion_logged_once(monkeypatch, caplog):
 
     completion_logs = [record for record in caplog.records if "TEST_MODE window completed" in record.message]
     assert len(completion_logs) == 1
+
+
+def test_daily_prefetch_populates_expiries_cache(monkeypatch):
+    fa = setupDependencies(monkeypatch, minutes=5)
+
+    # Use a small, controlled symbol list and fake manager to avoid external calls
+    fa.OPTION_CHAIN_SYMBOLS = ["NSE:TEST-EQ"]
+
+    class FakeManager:
+        def get_expiries(self, instrument):
+            return ["2026-09-30"]
+
+        def get_expiry_dates(self, instrument):
+            return []
+
+        def get_option_chain(self, *args, **kwargs):
+            return []
+
+    fake_instrument = type("Instr", (), {"symbol": "NSE:TEST-EQ"})()
+
+    # Patch resolver and preferred brokers to use our fake objects
+    monkeypatch.setattr(fa.bdm.InstrumentResolver, "resolve", staticmethod(lambda s: fake_instrument))
+    monkeypatch.setattr(fa.bdm.PreferredBrokers, "managers", staticmethod(lambda: {"fyers": FakeManager()}))
+
+    # Clear cache, run daily prefetch, and validate cache populated
+    fa.EXPIRIES_CACHE.clear()
+    fa.DailyScheduler().run()
+
+    today = datetime.now(fa.IST_TZ).strftime("%Y-%m-%d")
+    cache_key = ("fyers", "NSE:TEST-EQ", today)
+    assert cache_key in fa.EXPIRIES_CACHE
+    assert isinstance(fa.EXPIRIES_CACHE[cache_key], list)
+
+
+def test_daily_prefetch_logs_warning_when_no_expiries(monkeypatch, caplog):
+    fa = setupDependencies(monkeypatch, minutes=5)
+
+    fa.OPTION_CHAIN_SYMBOLS = ["NSE:EMPTY-EQ"]
+
+    class EmptyManager:
+        def get_expiries(self, instrument):
+            return []
+
+        def get_expiry_dates(self, instrument):
+            return []
+
+        def get_option_chain(self, *args, **kwargs):
+            return []
+
+    fake_instrument = type("Instr", (), {"symbol": "NSE:EMPTY-EQ"})()
+    monkeypatch.setattr(fa.bdm.InstrumentResolver, "resolve", staticmethod(lambda s: fake_instrument))
+    monkeypatch.setattr(fa.bdm.PreferredBrokers, "managers", staticmethod(lambda: {"fyers": EmptyManager()}))
+
+    fa.EXPIRIES_CACHE.clear()
+    with caplog.at_level(logging.WARNING):
+        fa.DailyScheduler().run()
+
+    warnings = [r for r in caplog.records if "expiries not resolved during pre-market prefetch" in r.message]
+    assert len(warnings) >= 1

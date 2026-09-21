@@ -36,6 +36,7 @@ IST_TZ = pytz.timezone(MarketTimes.timezone())
 IS_RUNNING_LOCALLY_AT_START = is_running_locally()
 MARKET_OPEN_TIME = MarketTimes.open()
 MARKET_CLOSE_TIME = MarketTimes.close()
+EXPIRIES_CACHE: dict[tuple[str, str, str], list] = {}
 
 
 class MarketCalendar:
@@ -169,11 +170,16 @@ class LiveScheduler:
         return []
 
     def _fetch_option_chain_range(self, manager, broker_name, instrument, chain_cache) -> None:
-        try:
-            expiries = self._expiries_for(manager, broker_name, instrument)
-        except Exception:
-            logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to fetch expiries")
-            return
+        today = datetime.now(IST_TZ).strftime("%Y-%m-%d")
+        cache_key = (broker_name, instrument.symbol, today)
+        expiries = EXPIRIES_CACHE.get(cache_key)
+        if expiries is None:
+            try:
+                expiries = self._expiries_for(manager, broker_name, instrument) or []
+                EXPIRIES_CACHE[cache_key] = expiries
+            except Exception:
+                logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to fetch expiries")
+                return
 
         # Resolve a deduplicated, sorted list of expiries for up to `weeks` and `months`
         expiry_list = bdm.ExpiryResolver.resolve_range(expiries, weeks=self.weeks, months=self.months)
@@ -251,6 +257,18 @@ class DailyScheduler:
                 continue
 
             for broker_name, manager in bdm.PreferredBrokers.managers().items():
+                try:
+                    today = datetime.now(IST_TZ).strftime("%Y-%m-%d")
+                    cache_key = (broker_name, instrument.symbol, today)
+                    expiries = LiveScheduler._expiries_for(manager, broker_name, instrument) or []
+                    EXPIRIES_CACHE[cache_key] = expiries
+                    if not expiries:
+                        logging.warning(
+                            f"[DailyScheduler] {instrument.symbol} ({broker_name}) expiries not resolved during pre-market prefetch; running here and LiveScheduler will fetch on demand"
+                        )
+                except Exception:
+                    logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) failed to prefetch expiries")
+
                 self._fetch_option_chain(manager, broker_name, instrument, chain_cache)
 
         logging.info("=== Daily Job Completed ===")
