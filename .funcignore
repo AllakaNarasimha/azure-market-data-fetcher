@@ -38,4 +38,3 @@ tests/
 coverage/
 dist/
 build/
-scripts/pack_app.ps1

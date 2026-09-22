@@ -5,7 +5,6 @@ Usage: python scripts/pack_app.py -d dest.zip [--dry-run]
 """
 import argparse
 import fnmatch
-import os
 import sys
 from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
