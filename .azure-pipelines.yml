@@ -20,3 +20,4 @@ stages:
       azureServiceConnection: 'MyAzureConnection'
       sourceBranch: '$(Build.SourceBranch)'
       sourceVersionMessage: '$(Build.SourceVersionMessage)'
+      allowNonMasterDeploy: true
