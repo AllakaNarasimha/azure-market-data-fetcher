@@ -18,6 +18,15 @@ __pycache__/
 summary_oi_data.py
 run_expiry_flow.py
 
+# Recommended ignore lines (added by pack helper)
+venv/
+.env/
+__pycache__/
+*.pyc
+.python_packages/
+*.pytest_cache/
+.pytest_cache/
+
 # Additional recommended excludes to avoid large/irrelevant files in zips
 .git/
 .github/
