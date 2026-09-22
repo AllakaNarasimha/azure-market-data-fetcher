@@ -1,8 +1,5 @@
 # Virtual environments
-# NOTE: .python_packages/ must NOT be ignored here. The deploy pipeline installs
-# dependencies into .python_packages/lib/site-packages before packaging, and this
-# app deploys via an external-URL WEBSITE_RUN_FROM_PACKAGE (Oryx build is skipped).
-# Excluding this folder strips all deps from the zip, causing "0 functions loaded".
+# .python_packages/ intentionally NOT listed: deploy pipeline vendors deps there.
 .venv/
 .venv311/
 venv/
@@ -19,7 +16,10 @@ test_mode_data/
 
 # Local Azure SDK stub (must never be deployed)
 # (shadows the real azure-functions/azure-identity/azure-storage-blob packages)
-azure/
+# NOTE: leading slash anchors this to the repo root only. Without it, this pattern
+# also matches .python_packages/lib/site-packages/azure/ (the real vendored SDK),
+# stripping azure.identity/azure.storage.blob from the deploy zip -> 0 functions loaded.
+/azure/
 
 # Application bundles and artifacts
 app.zip
