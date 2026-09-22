@@ -1,8 +1,8 @@
 # Virtual environments
+# .python_packages/ intentionally NOT listed: deploy pipeline vendors deps there.
 .venv/
 .venv311/
 venv/
-.python_packages/
 
 # Local configuration and secrets
 local.settings.json
@@ -16,7 +16,10 @@ test_mode_data/
 
 # Local Azure SDK stub (must never be deployed)
 # (shadows the real azure-functions/azure-identity/azure-storage-blob packages)
-azure/
+# NOTE: leading slash anchors this to the repo root only. Without it, this pattern
+# also matches .python_packages/lib/site-packages/azure/ (the real vendored SDK),
+# stripping azure.identity/azure.storage.blob from the deploy zip -> 0 functions loaded.
+/azure/
 
 # Application bundles and artifacts
 app.zip
