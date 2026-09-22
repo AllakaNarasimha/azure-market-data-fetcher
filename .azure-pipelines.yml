@@ -18,3 +18,5 @@ stages:
       appName: 'marketdata-func-0916-narasimha'              
       environmentName: 'Development'
       azureServiceConnection: 'MyAzureConnection'
+      sourceBranch: '$(Build.SourceBranch)'
+      sourceVersionMessage: '$(Build.SourceVersionMessage)'
