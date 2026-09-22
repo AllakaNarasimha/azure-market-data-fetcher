@@ -2,6 +2,7 @@ trigger:
   branches:
     include:
       - master
+      - refactor_update
 
 resources:
   repositories:
