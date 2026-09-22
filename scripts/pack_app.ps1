@@ -28,10 +28,7 @@ foreach ($f in $allFiles) {
         if ($pp.EndsWith('/')) { $pp = $pp.TrimEnd('/') }
 
         # If pattern contains wildcard characters, use -like directly
-        if ($pp -like '*[*?]*') {
-            if ($rel -like $pp) { $skip = $true; break }
-        } elseif ($pp -like '*.*') {
-            # filename or extension pattern like *.pyc
+        if ($pp -like '*[*?]*' -or $pp.StartsWith('*')) {
             if ($rel -like $pp) { $skip = $true; break }
         } else {
             # treat as prefix (directory) or exact file

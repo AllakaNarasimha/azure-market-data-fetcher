@@ -30,3 +30,5 @@ market_data_cache/
 *.bin
 
 .python_packages/
+list_zip_contents.py
+scripts/pack_app.ps1
