@@ -1,8 +1,11 @@
 # Virtual environments
+# NOTE: .python_packages/ must NOT be ignored here. The deploy pipeline installs
+# dependencies into .python_packages/lib/site-packages before packaging, and this
+# app deploys via an external-URL WEBSITE_RUN_FROM_PACKAGE (Oryx build is skipped).
+# Excluding this folder strips all deps from the zip, causing "0 functions loaded".
 .venv/
 .venv311/
 venv/
-.python_packages/
 
 # Local configuration and secrets
 local.settings.json
