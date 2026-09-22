@@ -1,40 +1,60 @@
+# Virtual environments
 .venv/
 .venv311/
-local_data/
-local.settings.json
-# Local azure SDK stub folder (shadows the real azure-functions/azure-identity/
-# azure-storage-blob packages) - must never be deployed.
-azure/
-app.zip
-app_clean.zip
-run_auth.py
-run_once.py
-.azure-personal/
-*.parquet
-.vscode/
-__pycache__/
-*.pyc
-*.log
-summary_oi_data.py
-run_expiry_flow.py
-
-# Recommended ignore lines (added by pack helper)
 venv/
-.env/
-__pycache__/
-*.pyc
 .python_packages/
-*.pytest_cache/
-.pytest_cache/
 
-# Additional recommended excludes to avoid large/irrelevant files in zips
-.git/
-.github/
+# Local configuration and secrets
+local.settings.json
+.env/
+.azure-personal/
+
+# Local data and dev-only folders
+local_data/
 package_extracted/
 test_mode_data/
-tests/
+
+# Local Azure SDK stub (must never be deployed)
+# (shadows the real azure-functions/azure-identity/azure-storage-blob packages)
+azure/
+
+# Application bundles and artifacts
+app.zip
+app_clean.zip
+
+# Local-only scripts and generated files
+run_auth.py
+run_once.py
+run_expiry_flow.py
+summary_oi_data.py
+
+# Python cache and test artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+*.pytest_cache/
+
+# Logs
+*.log
+
+# Large data and DB files
+*.parquet
 *.sqlite
 *.db
+
+# Editor / IDE
+.vscode/
+
+# VCS and GitHub
+.git/
+.github/
+
+# Tests
+tests/
+
+# Build / packaging
 coverage/
 dist/
 build/
+
+# End of file

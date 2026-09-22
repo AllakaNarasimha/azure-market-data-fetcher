@@ -1,34 +1,64 @@
-__pycache__/
-*.pyc
+# Virtual environments
 .venv/
 .venv311/
-.azure-personal/
-authenticate.log
-broker_authenticate.notes.md
-local_data/broker_tokens/
-# Ignore all local data/cache and local settings used for development/testing
-local_data/
-local.settings.json
-run_schedulers.py
+venv/
+.python_packages/
 
-# Ignore local azure SDK stubs created for testing
-/azure/
-
-# Ignore one-shot runners and local test scripts
-run_once.py
-run_auth.py
-
-# Python tooling
+# Python cache and tooling
+__pycache__/
+*.pyc
 .mypy_cache/
 .pytest_cache/
+*.pytest_cache/
 
-# Ignore market data cache folder (local cache)
+# Local configuration and secrets
+local.settings.json
+.env/
+.azure-personal/
+
+# Local data, caches and dev-only folders
+local_data/
+local_data/broker_tokens/
 market_data_cache/
+package_extracted/
+test_mode_data/
 
-# Ignore log and binary cache files
+# Local Azure SDK stub (must not be deployed)
+azure/
+
+# Application artifacts and bundles
+app.zip
+app_clean.zip
+
+# One-shot runners and local test scripts
+run_once.py
+run_auth.py
+run_schedulers.py
+run_expiry_flow.py
+summary_oi_data.py
+
+# Logs and binary cache files
 *.log
 *.bin
+*.sqlite
+*.db
+*.parquet
 
-.python_packages/
-list_zip_contents.py
-scripts/pack_app.ps1
+# Editor / IDE
+.vscode/
+
+# VCS and GitHub
+.git/
+.github/
+
+# Tests
+tests/
+
+# Build / packaging
+coverage/
+dist/
+build/
+
+# Misc
+authenticate.log
+broker_authenticate.notes.md

@@ -1,0 +1,61 @@
+# python.yml - Packaging steps for Python projects (ArchiveFiles variant)
+
+steps:
+- checkout: self
+- task: UsePythonVersion@0
+  displayName: 'Set Python Version'
+  inputs:
+    versionSpec: '3.11'
+    addToPath: true
+
+# 1. Install dependencies (and optionally run tests) to ensure the code is healthy
+- script: |
+    set -euo pipefail
+    echo "Searching for requirements.txt under $(Build.SourcesDirectory)"
+    REQ=$(find "$(Build.SourcesDirectory)" -maxdepth 6 -type f -iname 'requirements*.txt' | head -n1 || true)
+    if [ -z "$REQ" ]; then
+      echo "requirements file not found under $(Build.SourcesDirectory)"
+      echo "Listing $(Build.SourcesDirectory):"
+      ls -la "$(Build.SourcesDirectory)" || true
+      exit 1
+    fi
+    echo "Using requirements file: $REQ"
+    python -m pip install --upgrade pip
+    python -m pip install -r "$REQ" \
+      --target="$(System.DefaultWorkingDirectory)/.python_packages/lib/site-packages" \
+      --platform manylinux2014_x86_64 \
+      --implementation cp \
+      --python-version 3.11 \
+      --only-binary=:all: \
+      --upgrade
+  displayName: 'Install Dependencies (discover requirements)'
+  
+
+# 2. Package the application into a cleaned .zip using the repo packer (reads .funcignore)
+- task: Bash@3
+  displayName: 'Clean $(Build.ArtifactStagingDirectory)'
+  inputs:
+    targetType: 'inline'
+    script: |
+      if [ -d "$(Build.ArtifactStagingDirectory)" ]; then
+        rm -rf "$(Build.ArtifactStagingDirectory)"/* || true
+      else
+        mkdir -p "$(Build.ArtifactStagingDirectory)"
+      fi
+
+- task: Bash@3
+  displayName: 'Create cleaned zip (uses .funcignore)'
+  inputs:
+    targetType: 'inline'
+    script: |
+      python3 "$(Build.SourcesDirectory)/scripts/pack_app.py" -d "$(Build.ArtifactStagingDirectory)/python-app-$(Build.BuildId).zip"
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish cleaned artifact'
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+    ArtifactName: 'drop'
+    publishLocation: 'Container'
+
+# Notes:
+# - This uses the ArchiveFiles task; it does not read .funcignore. If you need .funcignore filtering, use the packer variant instead.
