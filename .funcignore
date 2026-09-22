@@ -17,3 +17,16 @@ __pycache__/
 *.log
 summary_oi_data.py
 run_expiry_flow.py
+
+# Additional recommended excludes to avoid large/irrelevant files in zips
+.git/
+.github/
+package_extracted/
+test_mode_data/
+tests/
+*.sqlite
+*.db
+coverage/
+dist/
+build/
+scripts/pack_app.ps1

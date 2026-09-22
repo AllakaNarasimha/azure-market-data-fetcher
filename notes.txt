@@ -23,3 +23,9 @@ git remote set-url origin https://github.com/AllakaNarasimha/azure-market-data-f
 
 Install python 
 winget install --id=Python.Python.3.11 -e --source=winget
+
+// Recommended: use the provided packaging script to avoid including venvs and large data
+// Dry run to list files that would be included:
+// powershell -ExecutionPolicy Bypass -File .\scripts\pack_app.ps1 -DryRun
+// Create the zip:
+// powershell -ExecutionPolicy Bypass -File .\scripts\pack_app.ps1 -Destination app_clean.zip
