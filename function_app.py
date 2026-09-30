@@ -351,19 +351,22 @@ def daily_job(dailyTimer: func.TimerRequest) -> None:
 # full-list market_data_fetcher/_live_schedule trigger.
 PARALLEL_BATCH_SIZE = 5
 
-def _calculate_dynamic_option_chain_cron(symbol_count: int, batch_size: int, weekday_field: str = "1-5") -> Optional[str]:
+def _calculate_dynamic_option_chain_cron(
+    symbol_count: int, batch_size: int, weekday_field: str = "1-5", hour_field: str = "9-16"
+) -> Optional[str]:
     if symbol_count == 0:
         return None
     required_seconds = math.ceil(symbol_count / batch_size)
     end_second = required_seconds - 1
     seconds_field = "0" if end_second == 0 else f"0-{end_second}"
-    return f"{seconds_field} * 9-16 * * {weekday_field}"
+    return f"{seconds_field} * {hour_field} * * {weekday_field}"
 
 
-# TEST_MODE must tick on weekends too so the short-lived TEST_MODE window can close and log completion.
+# TEST_MODE must tick on weekends/off-hours too so the short-lived TEST_MODE window can close and log completion.
 _option_chain_weekday_field = "*" if EnvConfig.test_mode() else "1-5"
+_option_chain_hour_field = "*" if EnvConfig.test_mode() else "9-16"
 DYNAMIC_OPTION_CHAIN_CRON = _calculate_dynamic_option_chain_cron(
-    len(OPTION_CHAIN_SYMBOLS), PARALLEL_BATCH_SIZE, weekday_field=_option_chain_weekday_field
+    len(OPTION_CHAIN_SYMBOLS), PARALLEL_BATCH_SIZE, weekday_field=_option_chain_weekday_field, hour_field=_option_chain_hour_field
 )
 
 if DYNAMIC_OPTION_CHAIN_CRON:
