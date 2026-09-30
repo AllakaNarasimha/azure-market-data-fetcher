@@ -93,7 +93,7 @@ def generate_stock_arrival_summary(output_csv: Optional[str] = None) -> pd.DataF
     per-stock round number (`record_seq`: 1st snapshot, 2nd snapshot, ...),
     then sorts all stocks together (per day, chronologically) so you see
     every stock's 1st record, then every stock's 2nd record, and so on, along
-    with the time gap (`diff`) from the previously-arrived record that day.
+    with the time gap (`diff`) since that same stock's previous record that day.
 
     Returns a DataFrame with columns: date, record_seq, stock, localtimestamp, diff.
     """
@@ -126,8 +126,9 @@ def generate_stock_arrival_summary(output_csv: Optional[str] = None) -> pd.DataF
         return pd.DataFrame(columns=["date", "record_seq", "stock", "localtimestamp", "diff"])
 
     result = pd.concat(all_snapshots, ignore_index=True)
+    result.sort_values(["date", "stock", "localtimestamp"], inplace=True)
+    result["diff"] = result.groupby(["date", "stock"])["localtimestamp"].diff().fillna(pd.Timedelta(0))
     result.sort_values(["date", "localtimestamp"], inplace=True)
-    result["diff"] = result.groupby("date")["localtimestamp"].diff().fillna(pd.Timedelta(0))
     result = result[["date", "record_seq", "stock", "localtimestamp", "diff"]].reset_index(drop=True)
 
     if output_csv:
