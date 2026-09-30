@@ -12,7 +12,8 @@ from typing import Optional
 import pandas as pd
 import requests
 
-from broker_authenticate import BrokerAuth, is_running_locally
+from broker_authenticate import BrokerAuth
+from blob_utils import BlobUtils
 from blob_utils import BlobUtils
 
 logger = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ class MasterFileCache:
     CONTAINER = BlobUtils.BROKER_DATA_BLOB
 
     def __init__(self, local_dir: Path):
-        self.is_local = is_running_locally()
+        self.is_local = BlobUtils.is_running_locally()
         self.local_dir = local_dir
         self._container_client = None
         if not self.is_local:
