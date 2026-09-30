@@ -29,7 +29,14 @@ steps:
       --only-binary=:all: \
       --upgrade
   displayName: 'Install Dependencies (discover requirements)'
-  
+
+# 1b. Run unit tests against the vendored deps so a failing test blocks packaging/deploy
+- script: |
+    set -euo pipefail
+    export PYTHONPATH="$(System.DefaultWorkingDirectory)/.python_packages/lib/site-packages:$PYTHONPATH"
+    cd "$(Build.SourcesDirectory)"
+    python -m pytest tests/ -q
+  displayName: 'Run unit tests'
 
 # 2. Package the application into a cleaned .zip using the repo packer (reads .funcignore)
 - task: Bash@3
