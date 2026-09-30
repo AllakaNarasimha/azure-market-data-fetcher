@@ -41,6 +41,7 @@ summary_oi_data.py
 
 # Generated reports (produced by summary_oi_data.py)
 stock_arrival_summary.csv
+test_stock_arrival_summary.csv
 
 # Logs and binary cache files
 *.log

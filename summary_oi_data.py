@@ -23,6 +23,7 @@ from typing import Optional
 import pandas as pd
 
 from blob_utils import BlobUtils
+from cache_utils import MARKET_CACHE_DIRNAME, TEST_CACHE_DIRNAME
 from env_config import EnvConfig
 from market_data_storage_client import MarketDataStorageClient
 
@@ -42,6 +43,10 @@ if BlobUtils.is_running_locally() and os.path.exists("local.settings.json"):
         logger.exception("Failed to load local.settings.json into environment")
 
 OPTION_CHAIN_PREFIX = "option_chain/"
+# In the test-mode-data container, BlobSync prefixes every blob with the
+# market_data_cache folder (see cache_utils.test_blob_name), so option-chain
+# blobs live one level deeper than in the market-data-cache container.
+TEST_OPTION_CHAIN_PREFIX = f"{MARKET_CACHE_DIRNAME}/{OPTION_CHAIN_PREFIX}"
 PART_FILE_PATTERN = "part-0.parquet"
 # fetched_at is stored as a naive UTC datetime (datetime.now() on the host); shift to IST for reporting.
 IST_OFFSET = pd.Timedelta(hours=5, minutes=30)
@@ -67,6 +72,19 @@ def _gather_option_chain_blobs(storage_client: MarketDataStorageClient) -> list:
     return matches
 
 
+def _gather_test_option_chain_blobs(storage_client: MarketDataStorageClient) -> list:
+    """Collect every option-chain `part-0.parquet` blob from the test-mode-data container."""
+    try:
+        blob_objs = storage_client.list_files_in_subfolder(
+            BlobUtils.TEST_MODE_CACHE_BLOB, TEST_OPTION_CHAIN_PREFIX, return_blob_objects=True
+        )
+    except Exception:
+        logger.exception("Failed listing option-chain blobs under '%s'", TEST_OPTION_CHAIN_PREFIX)
+        return []
+
+    return [blob_obj for blob_obj in blob_objs if fnmatch.fnmatch(Path(blob_obj.name).name, PART_FILE_PATTERN)]
+
+
 def _extract_underlying_symbol(blob_name: str) -> str:
     """Pull the decoded stock/underlying name out of a `.../underlying=<enc>/...` blob path."""
     match = re.search(r"underlying=([^/\\]+)", blob_name)
@@ -85,27 +103,25 @@ def _read_option_chain_parquet(storage_client: MarketDataStorageClient, blob_obj
     return pd.read_parquet(io.BytesIO(data))
 
 
-def generate_stock_arrival_summary(output_csv: Optional[str] = None) -> pd.DataFrame:
-    """Build a per-day, per-stock arrival-time summary from cached option-chain data.
+def _read_test_option_chain_parquet(storage_client: MarketDataStorageClient, blob_obj) -> pd.DataFrame:
+    """Load a single test-mode option-chain parquet, from local disk if mirrored, else from blob storage."""
+    blob_name = getattr(blob_obj, "name", str(blob_obj))
+    # Locally, test-mode blobs are mirrored under test_mode_data/<blob_name>.
+    local_path = Path(TEST_CACHE_DIRNAME) / blob_name
+    if local_path.exists():
+        return pd.read_parquet(local_path)
 
-    For every stock's option-chain parquet, takes every distinct `fetched_at`
-    snapshot per calendar day (not just the first), tags it with its
-    per-stock round number (`record_seq`: 1st snapshot, 2nd snapshot, ...),
-    then sorts all stocks together (per day, chronologically) so you see
-    every stock's 1st record, then every stock's 2nd record, and so on, along
-    with the time gap (`diff`) since that same stock's previous record that day.
+    data = storage_client.fetch_file_content(BlobUtils.TEST_MODE_CACHE_BLOB, blob_name)
+    return pd.read_parquet(io.BytesIO(data))
 
-    Returns a DataFrame with columns: date, record_seq, stock, localtimestamp, diff.
-    """
-    storage_client = MarketDataStorageClient()
-    blobs = _gather_option_chain_blobs(storage_client)
-    logger.info("Found %d option-chain parquet files", len(blobs))
 
+def _build_arrival_summary(storage_client: MarketDataStorageClient, blobs: list, read_fn) -> pd.DataFrame:
+    """Shared arrival-summary builder used by both the live and test-mode entry points."""
     all_snapshots = []
     for blob_obj in blobs:
         stock = _extract_underlying_symbol(getattr(blob_obj, "name", str(blob_obj)))
         try:
-            df = _read_option_chain_parquet(storage_client, blob_obj)
+            df = read_fn(storage_client, blob_obj)
         except Exception:
             logger.exception("Failed reading option-chain parquet for %s", stock)
             continue
@@ -129,7 +145,44 @@ def generate_stock_arrival_summary(output_csv: Optional[str] = None) -> pd.DataF
     result.sort_values(["date", "stock", "localtimestamp"], inplace=True)
     result["diff"] = result.groupby(["date", "stock"])["localtimestamp"].diff().fillna(pd.Timedelta(0))
     result.sort_values(["date", "localtimestamp"], inplace=True)
-    result = result[["date", "record_seq", "stock", "localtimestamp", "diff"]].reset_index(drop=True)
+    return result[["date", "record_seq", "stock", "localtimestamp", "diff"]].reset_index(drop=True)
+
+
+def generate_stock_arrival_summary(output_csv: Optional[str] = None) -> pd.DataFrame:
+    """Build a per-day, per-stock arrival-time summary from cached option-chain data.
+
+    For every stock's option-chain parquet, takes every distinct `fetched_at`
+    snapshot per calendar day (not just the first), tags it with its
+    per-stock round number (`record_seq`: 1st snapshot, 2nd snapshot, ...),
+    then sorts all stocks together (per day, chronologically) so you see
+    every stock's 1st record, then every stock's 2nd record, and so on, along
+    with the time gap (`diff`) since that same stock's previous record that day.
+
+    Returns a DataFrame with columns: date, record_seq, stock, localtimestamp, diff.
+    """
+    storage_client = MarketDataStorageClient()
+    blobs = _gather_option_chain_blobs(storage_client)
+    logger.info("Found %d option-chain parquet files", len(blobs))
+
+    result = _build_arrival_summary(storage_client, blobs, _read_option_chain_parquet)
+
+    if output_csv:
+        result.to_csv(output_csv, index=False)
+
+    return result
+
+
+def generate_test_stock_arrival_summary(output_csv: Optional[str] = None) -> pd.DataFrame:
+    """Same as `generate_stock_arrival_summary`, but reads cached option-chain data
+    from the test-mode-data blob container instead of market-data-cache.
+
+    Returns a DataFrame with columns: date, record_seq, stock, localtimestamp, diff.
+    """
+    storage_client = MarketDataStorageClient()
+    blobs = _gather_test_option_chain_blobs(storage_client)
+    logger.info("Found %d option-chain parquet files in test-mode-data", len(blobs))
+
+    result = _build_arrival_summary(storage_client, blobs, _read_test_option_chain_parquet)
 
     if output_csv:
         result.to_csv(output_csv, index=False)
@@ -139,5 +192,10 @@ def generate_stock_arrival_summary(output_csv: Optional[str] = None) -> pd.DataF
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    result = generate_stock_arrival_summary(output_csv="stock_arrival_summary.csv")
-    print(result.to_string(index=False))
+    run_on_test_data = True
+    if not run_on_test_data:
+        result = generate_stock_arrival_summary(output_csv="stock_arrival_summary.csv")
+        print(result.to_string(index=False))
+    else:
+        result = generate_test_stock_arrival_summary(output_csv="test_stock_arrival_summary.csv")
+        print(result.to_string(index=False))

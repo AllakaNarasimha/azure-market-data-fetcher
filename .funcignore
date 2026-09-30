@@ -38,6 +38,7 @@ run_expiry_flow.py
 summary_oi_data.py
 
 stock_arrival_summary.csv
+test_stock_arrival_summary.csv
 notes.txt
 broker_authenticate.notes.md
 # Only referenced from function_app.py's local `__main__` dev block, never on the
