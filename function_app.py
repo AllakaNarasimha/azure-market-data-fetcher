@@ -10,7 +10,8 @@ from pandas.tseries.offsets import CustomBusinessDay
 import azure.functions as func
 
 import broker_data_manager as bdm
-from broker_authenticate import is_running_locally
+from blob_utils import BlobUtils
+from market_data_storage_client import MarketDataStorageClient
 from parquet_cache_manager import ParquetCacheManager
 from market_data_cache import OptionChainCacheManager
 from market_times import MarketTimes
@@ -20,7 +21,7 @@ from env_config import EnvConfig
 # When running the module directly (not in Azure), load local.settings.json
 # into environment variables so values like TEST_MODE are available.
 try:
-    if is_running_locally() and os.path.exists("local.settings.json"):
+    if BlobUtils.is_running_locally() and os.path.exists("local.settings.json"):
         with open("local.settings.json", "r") as _f:
             _cfg = json.load(_f)
             for _k, _v in _cfg.get("Values", {}).items():
@@ -33,7 +34,7 @@ except Exception:
 app = func.FunctionApp()
 
 IST_TZ = pytz.timezone(MarketTimes.timezone())
-IS_RUNNING_LOCALLY_AT_START = is_running_locally()
+IS_RUNNING_LOCALLY_AT_START = BlobUtils.is_running_locally()
 MARKET_OPEN_TIME = MarketTimes.open()
 MARKET_CLOSE_TIME = MarketTimes.close()
 EXPIRIES_CACHE: dict[tuple[str, str, str], list] = {}
@@ -310,7 +311,7 @@ class DailyScheduler:
         except Exception:
             logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) option chain fetch failed")
 
-logging.info(f"Startup env: TEST_MODE={EnvConfig.env('TEST_MODE')!r}, WEBSITE_SITE_NAME={EnvConfig.website_site_name()!r}")
+logging.info(f"Startup env: TEST_MODE={EnvConfig.env('TEST_MODE')!r}, WEBSITE_SITE_NAME={BlobUtils.website_site_name()!r}")
 # Initialize a short-lived TEST_MODE window at process start (if enabled).
 if EnvConfig.test_mode():
     IST_TZ = pytz.timezone(MarketTimes.timezone())
@@ -330,4 +331,36 @@ def market_data_fetcher(mytimer: func.TimerRequest) -> None:
 def daily_job(dailyTimer: func.TimerRequest) -> None:
     DailyScheduler().run()
 
+if __name__ == "__main__":
+    logging.info("Function app started")
+    if BlobUtils.is_running_locally():
+        logging.info("Running locally")
+        storage_client = MarketDataStorageClient()
+        # Use recursive listing to traverse nested virtual folders and obtain
+        # blob objects (not just names) so downstream helpers can use them
+        folders = storage_client.list_folders_in_container(BlobUtils.MARKET_DATA_CACHE_BLOB)
+        matches = []
+        import fnmatch
+        from pathlib import Path
+        from azure_blob_market_indexer import AzureBlobMarketIndexer
+        for folder in folders:
+            try:
+                if 'option_chain/' not in folder:
+                    continue
+
+                blob_objs = storage_client.list_files_in_subfolder(
+                    BlobUtils.MARKET_DATA_CACHE_BLOB, folder, return_blob_objects=True
+                )
+                for blob_obj in blob_objs:
+                    if fnmatch.fnmatch(Path(blob_obj.name).name, 'part-0.parquet'):
+                        matches.append(blob_obj)
+            except Exception as e:
+                print('warning listing', folder, e)
+        logging.info("All folders in %s: %s", BlobUtils.MARKET_DATA_CACHE_BLOB, folders)
+        logging.info("All parquet matches: %s", [getattr(m, 'name', str(m)) for m in matches])
+        if matches:
+            first_blob = matches[0]
+            azure_blob_market_index = AzureBlobMarketIndexer()
+            dst_index_file = azure_blob_market_index.generate_and_upload_index(first_blob)
+            logging.info("Generated and uploaded index file: %s", dst_index_file)
 

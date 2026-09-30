@@ -1,6 +1,0 @@
-[cloud]
-name = AzureCloud
-
-[core]
-enable_broker_on_windows = false
-

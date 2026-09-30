@@ -19,7 +19,9 @@ local.settings.json
 # Local data, caches and dev-only folders
 local_data/
 local_data/broker_tokens/
-market_data_cache/
+# Local index-generation output written under the "market-data-cache" name at
+# the repo root (was previously misspelled "market_data_cache/" and never matched).
+market-data-cache/
 package_extracted/
 test_mode_data/
 
@@ -36,6 +38,9 @@ run_auth.py
 run_schedulers.py
 run_expiry_flow.py
 summary_oi_data.py
+
+# Generated reports (produced by summary_oi_data.py)
+stock_arrival_summary.csv
 
 # Logs and binary cache files
 *.log

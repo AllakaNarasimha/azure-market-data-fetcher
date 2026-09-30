@@ -18,7 +18,7 @@ from azure.keyvault.secrets import SecretClient
 from dhanhq import DhanContext, DhanLogin, dhanhq
 from fyers_apiv3 import fyersModel
 
-from blob_utils import BlobUtils, is_running_locally
+from blob_utils import BlobUtils
 from env_config import EnvConfig
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ class ConfigStore:
     LOCAL_SETTINGS_PATH = Path(__file__).parent / "local.settings.json"
 
     def __init__(self):
-        self.is_local = is_running_locally()
+        self.is_local = BlobUtils.is_running_locally()
         self.key_vault_url = EnvConfig.key_vault_url()
         # When running locally, ensure values from local.settings.json are
         # loaded into the process environment so standalone scripts (or
@@ -87,7 +87,7 @@ class TokenCache:
     LOCAL_DIR = Path(__file__).parent / "local_data" / "broker_tokens"
 
     def __init__(self):
-        self.is_local = is_running_locally()
+        self.is_local = BlobUtils.is_running_locally()
         self._container_client = None
         if not self.is_local:
             self._container_client = BlobUtils.get_container_client(BlobUtils.BROKER_TOKEN_BLOB)
@@ -429,7 +429,7 @@ class BrokerAuth:
 
 def main() -> None:
     handlers: list[logging.Handler] = [logging.StreamHandler()]
-    if is_running_locally():
+    if BlobUtils.is_running_locally():
         handlers.append(logging.FileHandler(Path(__file__).parent / "authenticate.log", encoding="utf-8"))
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", handlers=handlers)
 

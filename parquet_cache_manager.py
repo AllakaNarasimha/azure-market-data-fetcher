@@ -10,7 +10,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from broker_authenticate import is_running_locally
+from blob_utils import BlobUtils
 from blob_utils import BlobSync
 
 from market_times import MarketTimes
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 def _local_cache_root(subdir: str) -> str:
     """Repo-relative locally; writable temp dir in Azure (synced via BlobSync)."""
-    if is_running_locally():
+    if BlobUtils.is_running_locally():
         return subdir
     return str(Path(tempfile.gettempdir()) / subdir)
 
