@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import urllib.parse
 from datetime import date as date_cls
 from datetime import datetime, timedelta
@@ -159,6 +160,7 @@ class OptionChainCacheManager:
         source: str = "fyers",
         expiry_timestamp: str = "",
         fetched_at: Optional[datetime] = None,
+        batch_second: Optional[int] = None,
     ) -> int:
         """Flatten and persist a Fyers `optionchain()` response. Returns rows saved."""
         data = response.get("data", {}) if isinstance(response, dict) else {}
@@ -189,6 +191,25 @@ class OptionChainCacheManager:
         pq.write_table(pa.Table.from_pandas(df, preserve_index=False), file_path)
         self._blob_sync.upload(str(file_path), blob_name)
 
+        # Best-effort: write small metadata file alongside the day partition
+        try:
+            meta = pd.DataFrame([
+                {
+                    "underlying": underlying,
+                    "source": source,
+                    "expiry_timestamp": expiry_timestamp,
+                    "fetched_at": fetched_at,
+                    "batch_second": batch_second,
+                    "rows": len(df),
+                }
+            ])
+            meta_path = partition / "meta_data.parquet"
+            pq.write_table(pa.Table.from_pandas(meta, preserve_index=False), meta_path)
+            meta_blob_name = blob_name.replace("part-0.parquet", "meta_data.parquet")
+            self._blob_sync.upload(str(meta_path), meta_blob_name)
+        except Exception:
+            logging.exception("Failed writing option-chain meta_data.parquet")
+
         expiry_data = data.get("expiryData", [])
         if expiry_data:
             expiry_path = self._expiry_path(underlying)
@@ -207,6 +228,7 @@ class OptionChainCacheManager:
         responses: list[tuple[dict, str]],
         source: str = "fyers",
         fetched_at: Optional[datetime] = None,
+        batch_second: Optional[int] = None,
     ) -> int:
         """Flatten and persist multiple `optionchain()` responses (one per expiry) for the
         same underlying/day in a single read-modify-write-upload cycle, instead of one per
@@ -251,6 +273,31 @@ class OptionChainCacheManager:
             pq.write_table(pa.Table.from_pandas(df, preserve_index=False), file_path)
             self._blob_sync.upload(str(file_path), blob_name)
             saved_rows = len(df)
+
+            # Write metadata for the batch to meta_data.parquet next to the partition
+            try:
+                meta_rows = []
+                for (resp, exp_ts) in responses:
+                    data = resp.get("data", {}) if isinstance(resp, dict) else {}
+                    options = data.get("optionsChain", []) if isinstance(data, dict) else []
+                    meta_rows.append(
+                        {
+                            "underlying": underlying,
+                            "source": source,
+                            "expiry_timestamp": exp_ts,
+                            "fetched_at": fetched_at,
+                            "batch_second": batch_second,
+                            "rows": len(options),
+                        }
+                    )
+                if meta_rows:
+                    meta_df = pd.DataFrame(meta_rows)
+                    meta_path = partition / "meta_data.parquet"
+                    pq.write_table(pa.Table.from_pandas(meta_df, preserve_index=False), meta_path)
+                    meta_blob_name = blob_name.replace("part-0.parquet", "meta_data.parquet")
+                    self._blob_sync.upload(str(meta_path), meta_blob_name)
+            except Exception:
+                logging.exception("Failed writing option-chain meta_data.parquet for batch")
 
         if expiry_data:
             expiry_path = self._expiry_path(underlying)
