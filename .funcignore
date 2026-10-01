@@ -37,6 +37,9 @@ run_once.py
 run_expiry_flow.py
 summary_oi_data.py
 
+# Test suite - only needed at CI/build time (pytest step), never at runtime
+tests/
+
 stock_arrival_summary.csv
 test_stock_arrival_summary.csv
 notes.txt

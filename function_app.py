@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+import asyncio
+import math
 import os
 import json
 import logging
@@ -114,14 +116,21 @@ def _build_scheduler_context() -> SchedulerContext:
 # MAIN: The Core Logic
 # ---------------------------------------------------------
 class LiveScheduler:
-    """Per-minute option chain fetcher: N strikes across weekly/monthly expiries."""
+    """Option chain fetcher: N strikes across weekly/monthly expiries.
 
-    def __init__(self, strikecount: int = 10, weeks: int = 6, months: int = 3):
+    `run()` accepts an optional `symbols` batch so `option_chain_fetcher`'s
+    dynamic per-second cron can spread OPTION_CHAIN_SYMBOLS across seconds
+    instead of fetching the full list in one go; omitting `symbols` still
+    processes the full OPTION_CHAIN_SYMBOLS list.
+    """
+
+    def __init__(self, strikecount: int = 10, weeks: int = 6, months: int = 3, max_concurrency: int = 5):
         self.strikecount = strikecount
         self.weeks = weeks
         self.months = months
+        self.max_concurrency = max_concurrency
 
-    def run(self) -> None:
+    def run(self, symbols: Optional[list[str]] = None) -> None:
         ctx = _build_scheduler_context()
 
         # Only allow scheduler execution when within market hours OR when the
@@ -150,17 +159,27 @@ class LiveScheduler:
         else:
             chain_cache = OptionChainCacheManager()
 
-        for symbol in OPTION_CHAIN_SYMBOLS:
-            try:
-                instrument = bdm.InstrumentResolver.resolve(symbol)
-            except Exception:
-                logging.exception(f"[LiveScheduler] Failed to resolve instrument for {symbol}")
-                continue
-
-            for broker_name, manager in bdm.PreferredBrokers.managers().items():
-                self._fetch_option_chain_range(manager, broker_name, instrument, chain_cache)
+        target_symbols = symbols if symbols is not None else OPTION_CHAIN_SYMBOLS
+        asyncio.run(self._run_async(target_symbols, chain_cache))
 
         logging.info("=== Execution Completed ===")
+
+    async def _run_async(self, symbols: list[str], chain_cache) -> None:
+        """Fetch every symbol's option chain concurrently, capped at `max_concurrency` in flight."""
+        semaphore = asyncio.Semaphore(self.max_concurrency)
+
+        async def _process_symbol(symbol: str) -> None:
+            async with semaphore:
+                try:
+                    instrument = await asyncio.to_thread(bdm.InstrumentResolver.resolve, symbol)
+                except Exception:
+                    logging.exception(f"[LiveScheduler] Failed to resolve instrument for {symbol}")
+                    return
+
+                for broker_name, manager in bdm.PreferredBrokers.managers().items():
+                    await asyncio.to_thread(self._fetch_option_chain_range, manager, broker_name, instrument, chain_cache)
+
+        await asyncio.gather(*(_process_symbol(symbol) for symbol in symbols))
 
     @staticmethod
     def _expiries_for(manager, broker_name: str, instrument) -> list:
@@ -320,16 +339,59 @@ if EnvConfig.test_mode():
 OPTION_CHAIN_SYMBOLS = EnvConfig.option_chain_symbols()
 WATCHLIST_SYMBOLS = EnvConfig.watchlist_symbols()
 
-# TEST_MODE must tick on weekends so the five-minute window can close and log completion.
-_live_schedule = "0 * * * * *" if EnvConfig.test_mode() else "0 * * * * 1-5"
-@app.schedule(schedule=_live_schedule, arg_name="mytimer", run_on_startup=EnvConfig.test_mode(), use_monitor=False)
-def market_data_fetcher(mytimer: func.TimerRequest) -> None:
-    LiveScheduler().run()
-
 # Daily job runs at 8:30 AM IST on weekdays
 @app.schedule(schedule="0 0 3 * * 1-5", arg_name="dailyTimer", run_on_startup=EnvConfig.test_mode(), use_monitor=False)
 def daily_job(dailyTimer: func.TimerRequest) -> None:
     DailyScheduler().run()
+
+# Dynamic NCRONTAB: only as many seconds-per-minute as needed to cover every
+# OPTION_CHAIN_SYMBOLS entry in PARALLEL_BATCH_SIZE-sized batches, e.g.
+# 12 symbols / 5 per batch -> seconds 0-2. Each invocation runs LiveScheduler
+# for just the batch owned by "its" second, replacing the old once-a-minute
+# full-list market_data_fetcher/_live_schedule trigger.
+PARALLEL_BATCH_SIZE = 5
+
+def _calculate_dynamic_option_chain_cron(
+    symbol_count: int, batch_size: int, weekday_field: str = "1-5", hour_field: str = "9-16"
+) -> Optional[str]:
+    if symbol_count == 0:
+        return None
+    required_seconds = math.ceil(symbol_count / batch_size)
+    end_second = required_seconds - 1
+    seconds_field = "0" if end_second == 0 else f"0-{end_second}"
+    return f"{seconds_field} * {hour_field} * * {weekday_field}"
+
+
+# TEST_MODE must tick on weekends/off-hours too so the short-lived TEST_MODE window can close and log completion.
+_option_chain_weekday_field = "*" if EnvConfig.test_mode() else "1-5"
+_option_chain_hour_field = "*" if EnvConfig.test_mode() else "9-16"
+DYNAMIC_OPTION_CHAIN_CRON = _calculate_dynamic_option_chain_cron(
+    len(OPTION_CHAIN_SYMBOLS), PARALLEL_BATCH_SIZE, weekday_field=_option_chain_weekday_field, hour_field=_option_chain_hour_field
+)
+
+if DYNAMIC_OPTION_CHAIN_CRON:
+    @app.schedule(schedule=DYNAMIC_OPTION_CHAIN_CRON, arg_name="chainTimer", run_on_startup=EnvConfig.test_mode(), use_monitor=False)
+    def option_chain_fetcher(chainTimer: func.TimerRequest) -> None:
+        now = datetime.now(IST_TZ)
+        current_second = now.second
+        target_seconds = [current_second]
+
+        # Catch up on any seconds missed within the same minute (e.g. cold start delay).
+        if chainTimer.past_due and chainTimer.schedule_status and chainTimer.schedule_status.last:
+            try:
+                last_run = datetime.fromisoformat(str(chainTimer.schedule_status.last))
+                if last_run.minute == now.minute and last_run.second < current_second:
+                    target_seconds = list(range(last_run.second + 1, current_second + 1))
+                    logging.warning(f"[LiveScheduler] Timer past due; catching up seconds {target_seconds}")
+            except Exception:
+                logging.exception("[LiveScheduler] Failed parsing schedule_status.last")
+
+        for sec in target_seconds:
+            start_idx = sec * PARALLEL_BATCH_SIZE
+            batch_symbols = OPTION_CHAIN_SYMBOLS[start_idx : start_idx + PARALLEL_BATCH_SIZE]
+            if not batch_symbols:
+                continue
+            LiveScheduler().run(symbols=batch_symbols)
 
 if __name__ == "__main__":
     logging.info("Function app started")

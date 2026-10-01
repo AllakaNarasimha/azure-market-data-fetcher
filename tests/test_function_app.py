@@ -62,7 +62,7 @@ def test_test_mode_window_resets_on_reload(monkeypatch):
 def test_test_mode_uses_all_days_schedule(monkeypatch):
     fa = setupDependencies(monkeypatch, minutes=5)
 
-    assert fa._live_schedule == "0 * * * * *"
+    assert fa.DYNAMIC_OPTION_CHAIN_CRON.split(" ")[-1] == "*"
 
 
 def test_daily_timer_runs_on_startup_in_test_mode(monkeypatch):
@@ -152,3 +152,46 @@ def test_daily_prefetch_logs_warning_when_no_expiries(monkeypatch, caplog):
 
     warnings = [r for r in caplog.records if "expiries not resolved during pre-market prefetch" in r.message]
     assert len(warnings) >= 1
+
+
+def test_live_scheduler_fetches_batch_concurrently(monkeypatch):
+    """A PARALLEL_BATCH_SIZE (5) symbol batch should be fetched concurrently,
+    not one-by-one, so the broker sees ~5 overlapping calls within the same
+    second instead of 5 calls spread out sequentially.
+    """
+    import time
+
+    fa = setupDependencies(monkeypatch, minutes=5)
+
+    symbols = [f"NSE:SYM{i}-EQ" for i in range(5)]
+    fa.OPTION_CHAIN_SYMBOLS = symbols
+
+    call_starts: list[float] = []
+    call_delay = 0.2
+
+    class SlowManager:
+        def get_expiries(self, instrument):
+            return ["2026-09-30"]
+
+        def get_option_chain(self, instrument, strikecount=10, expiries=None):
+            call_starts.append(time.monotonic())
+            time.sleep(call_delay)
+            return {"data": {}}
+
+    monkeypatch.setattr(fa.bdm.InstrumentResolver, "resolve", staticmethod(lambda s: type("Instr", (), {"symbol": s})()))
+    monkeypatch.setattr(fa.bdm.PreferredBrokers, "managers", staticmethod(lambda: {"fyers": SlowManager()}))
+    monkeypatch.setattr(fa.bdm.ExpiryResolver, "resolve_range", staticmethod(lambda expiries, weeks, months: ["2026-09-30"]))
+
+    fa.EXPIRIES_CACHE.clear()
+
+    start = time.monotonic()
+    fa.LiveScheduler(max_concurrency=5).run(symbols=symbols)
+    elapsed = time.monotonic() - start
+
+    assert len(call_starts) == 5
+    # Sequential would take ~5 * call_delay; concurrent stays close to one call_delay.
+    assert elapsed < call_delay * len(symbols)
+    # All 5 calls should have started within the same short window (i.e. "same second"),
+    # not staggered call_delay apart from each other.
+    assert max(call_starts) - min(call_starts) < call_delay
+
