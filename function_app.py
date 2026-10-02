@@ -71,7 +71,7 @@ if __name__ == "__main__":
             storage_client = MarketDataStorageClient()
             # Use recursive listing to traverse nested virtual folders and obtain
             # blob objects (not just names) so downstream helpers can use them
-            folders = storage_client.list_folders_in_container(BlobUtils.MARKET_DATA_CACHE_BLOB)
+            folders = storage_client.list_folders_in_container(BlobUtils.market_data_cache_blob())
             matches = []
             # Deferred: storage/azure_blob_market_indexer.py is excluded from the deploy
             # package by .funcignore (dev-only), so this must not be a top-level import.
@@ -82,14 +82,14 @@ if __name__ == "__main__":
                         continue
 
                     blob_objs = storage_client.list_files_in_subfolder(
-                        BlobUtils.MARKET_DATA_CACHE_BLOB, folder, return_blob_objects=True
+                        BlobUtils.market_data_cache_blob(), folder, return_blob_objects=True
                     )
                     for blob_obj in blob_objs:
                         if fnmatch.fnmatch(Path(blob_obj.name).name, 'part-0.parquet'):
                             matches.append(blob_obj)
                 except Exception as e:
                     logging.warning('warning listing %s: %s', folder, e)
-            logging.info("All folders in %s: %s", BlobUtils.MARKET_DATA_CACHE_BLOB, folders)
+            logging.info("All folders in %s: %s", BlobUtils.market_data_cache_blob(), folders)
             logging.info("All parquet matches: %s", [getattr(m, 'name', str(m)) for m in matches])
             if matches:
                 first_blob = matches[0]

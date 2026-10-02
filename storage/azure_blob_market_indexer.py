@@ -1,5 +1,4 @@
 import os
-import sys
 import tempfile
 import logging
 import re
@@ -19,7 +18,7 @@ class AzureBlobMarketIndexer:
 
     def __init__(self, container_name: str | None = None):
         # Default to the centralized market data container if not provided
-        self.container_name = container_name or BlobUtils.MARKET_DATA_CACHE_BLOB
+        self.container_name = container_name or BlobUtils.market_data_cache_blob()
         # Container client may be None if MARKET_STORAGE_CONNECTION is not configured
         self.container_client = BlobUtils.get_container_client(self.container_name)
         # Storage client used to fetch blob content when a blob path is supplied
@@ -121,7 +120,7 @@ class AzureBlobMarketIndexer:
                 return blob_path
 
             # Local fallback: move into mirrored local blob root
-            local_root = os.getenv(BlobUtils.LOCAL_BLOB_ROOT_ENV, BlobUtils.MARKET_DATA_CACHE_BLOB)
+            local_root = os.getenv(BlobUtils.LOCAL_BLOB_ROOT_ENV, BlobUtils.market_data_cache_blob())
             dst = os.path.join(local_root, self.container_name, index_filename)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.move(temp_local_path, dst)

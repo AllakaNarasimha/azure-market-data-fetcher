@@ -145,6 +145,22 @@ class EnvConfig:
         return cls.env("HISTORY_DAYS_INTERVAL", "1") or "1"
 
     @classmethod
+    def market_data_cache_blob(cls) -> str:
+        """Blob container name for market data cache (env `MARKET_DATA_CACHE_BLOB`).
+
+        Default: 'market-data-cache'
+        """
+        return cls.env("MARKET_DATA_CACHE_BLOB", "market-data-cache") or "market-data-cache"
+
+    @classmethod
+    def test_mode_cache_blob(cls) -> str:
+        """Blob container name for test-mode cache (env `TEST_MODE_CACHE_BLOB`).
+
+        Default: 'test-mode-data'
+        """
+        return cls.env("TEST_MODE_CACHE_BLOB", "test-mode-data") or "test-mode-data"
+
+    @classmethod
     def load_local_settings(cls, path: str = "local.settings.json", require_local_run: bool = True) -> bool:
         """Load `local.settings.json` into overrides when running locally.
 

@@ -18,7 +18,7 @@ from storage.market_data_storage_client import MarketDataStorageClient
 from utils.blob_utils import BlobUtils
 
 c = MarketDataStorageClient()
-container = BlobUtils.MARKET_DATA_CACHE_BLOB
+container = BlobUtils.market_data_cache_blob()
 
 
 def get_matches(prefix):
