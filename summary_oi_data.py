@@ -264,7 +264,7 @@ def generate_test_stock_arrival_summary(
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    run_on_test_data = False
+    run_on_test_data = True
     last_recent_days = 1
     # Ensure the `sumary` directory exists and store all outputs there
     out_dir = Path("summary")

@@ -70,17 +70,44 @@ class MarketCalendar:
     DEFAULT_BDAY = CustomBusinessDay(holidays=NSE_HOLIDAYS)
 
     @staticmethod
-    def get_trading_days_back(reference_date: datetime, days_back: int, holidays: list = None) -> pd.Timestamp:
-        """Return the exact Timestamp that is `days_back` trading sessions prior to `reference_date`.
-
-        Automatically skips weekends and exchange holidays.
-        """
-        ref_ts = pd.Timestamp(reference_date)
+    def get_trading_days_back(
+        reference_date: datetime, days_back: int, holidays: list | None = None, max_calendar_span_days: int = 90
+    ) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+        ref_ts = pd.Timestamp(reference_date).normalize()
         if int(days_back) == 0:
-            return ref_ts
+            return [(ref_ts, ref_ts)]
 
-        offset = CustomBusinessDay(holidays=holidays) if holidays is not None else MarketCalendar.DEFAULT_BDAY
-        return ref_ts - (offset * int(days_back))
+        # Build a descending list of trading dates (newest -> oldest)
+        trading_dates: list[pd.Timestamp] = []
+        d = ref_ts
+        holidays_set = set(holidays) if holidays is not None else None
+        while len(trading_dates) < int(days_back):
+            is_hol = MarketCalendar.is_holiday(d) if holidays is None else (d.strftime("%Y-%m-%d") in holidays_set)
+            if not is_hol:
+                trading_dates.append(pd.Timestamp(d))
+            d = d - pd.Timedelta(days=1)
+
+        # Chunk trading dates into segments where calendar span <= max_calendar_span_days
+        segments: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+        seg: list[pd.Timestamp] = []  # holds dates newest->oldest for current segment
+        for dt in trading_dates:
+            if not seg:
+                seg = [dt]
+                continue
+            # tentative earliest if we add dt
+            tentative_earliest = dt
+            tentative_span = (seg[0] - tentative_earliest).days + 1
+            if tentative_span <= max_calendar_span_days:
+                seg.append(dt)
+            else:
+                # close current segment (oldest, newest)
+                segments.append((seg[-1], seg[0]))
+                seg = [dt]
+
+        if seg:
+            segments.append((seg[-1], seg[0]))
+
+        return segments
 
     @staticmethod
     def is_holiday(check_date: datetime) -> bool:
@@ -240,10 +267,21 @@ class LiveScheduler:
 
 
 class DailyScheduler:
-    """Daily job: backfill last N-days history + snapshot option chains for the watchlist."""
+    """Daily job: backfill last N-days history + snapshot option chains for the watchlist.
 
-    def __init__(self, history_days: int = 12):
+    New constructor args:
+    - history_days: default days-back used when no explicit history_data_days provided
+    - history_interval: interval string passed to historical data fetch and candle persistence (e.g. '1D')
+
+    Fyers-supported resolutions:
+    - Intraday (minutes): pass the number of minutes as a string, e.g. "1", "2", "3", "5", "10", "15", "30", "60".
+    - Intraday (seconds): append an "S", e.g. "1S", "5S", "10S", "30S" (API support for second-level resolutions may vary).
+    - Daily and higher timeframes: use "1D" for daily candles.
+    """
+
+    def __init__(self, history_days: int = 90, history_interval: str = "1"):
         self.history_days = history_days
+        self.history_interval = history_interval
 
     def run(self) -> None:
         ctx = _build_scheduler_context()
@@ -272,7 +310,8 @@ class DailyScheduler:
             candle_cache = ParquetCacheManager()
             chain_cache = OptionChainCacheManager()
         end_date = datetime.now()
-        start_date = MarketCalendar.get_trading_days_back(end_date, days_back=self.history_days).to_pydatetime()
+        # Get one or more (start, end) ranges covering the requested trading days.
+        ranges = MarketCalendar.get_trading_days_back(end_date, days_back=self.history_days)
 
         for symbol in symbols:
             try:
@@ -280,9 +319,18 @@ class DailyScheduler:
             except Exception:
                 logging.exception(f"[DailyScheduler] Failed to resolve instrument for {symbol}")
                 continue
-
             for broker_name, manager in bdm.PreferredBrokers.managers().items():
-                self._fetch_history_if_missing(manager, broker_name, instrument, candle_cache, start_date, end_date)
+                # Iterate each (start,end) range and fetch separately to respect broker max-range limits
+                any_fetched = False
+                for seg_start, seg_end in ranges:
+                    fetched = self._fetch_history_if_missing(
+                        manager, broker_name, instrument, candle_cache, seg_start.to_pydatetime(), seg_end.to_pydatetime()
+                    )
+                    any_fetched = any_fetched or bool(fetched)
+                if not any_fetched:
+                    logging.warning(
+                        f"[DailyScheduler] {instrument.symbol} ({broker_name}) history fetch returned no data or failed for all ranges"
+                    )
 
         for symbol in option_chain_symbols:
             try:
@@ -308,33 +356,35 @@ class DailyScheduler:
 
         logging.info("=== Daily Job Completed ===")
 
-    @staticmethod
-    def _fetch_history_if_missing(manager, broker_name, instrument, candle_cache, start_date, end_date) -> None:
+    def _fetch_history_if_missing(self, manager, broker_name, instrument, candle_cache, start_date, end_date) -> bool:
+        """Return True if history was fetched and saved; False if cached, empty, or failed."""
         try:
-            cached = candle_cache.load_candles(instrument.symbol, start_date, end_date, interval="1D")
+            cached = candle_cache.load_candles(instrument.symbol, start_date, end_date, interval=self.history_interval)
             if cached:
                 logging.info(
                     f"[DailyScheduler] {instrument.symbol} ({broker_name}) history already cached "
                     f"({len(cached)} candles); skipping fetch"
                 )
-                return
+                return False
 
             response = manager.get_historical_data(
-                instrument, "1D", "EQUITY", start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
+                instrument, self.history_interval, "EQUITY", start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
             )
             candles = bdm.HistoryNormalizer.to_candles(broker_name, response)
             if not candles:
                 logging.warning(f"[DailyScheduler] {instrument.symbol} ({broker_name}) history response had no candles")
-                return
+                return False
 
             candle_cache.clean_and_save_candles(
-                instrument.symbol, candles, interval="1D", fetch_start=start_date, fetch_end=end_date
+                instrument.symbol, candles, interval=self.history_interval, fetch_start=start_date, fetch_end=end_date
             )
             logging.info(
                 f"[DailyScheduler] {instrument.symbol} ({broker_name}) history fetched & cached ({len(candles)} candles)"
             )
+            return True
         except Exception:
             logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) history fetch failed")
+            return False
 
     @staticmethod
     def _fetch_option_chain(manager, broker_name, instrument, chain_cache) -> None:
@@ -361,11 +411,14 @@ if EnvConfig.test_mode():
 
 OPTION_CHAIN_SYMBOLS = EnvConfig.option_chain_symbols()
 WATCHLIST_SYMBOLS = EnvConfig.watchlist_symbols()
+HISTORY_DAYS = EnvConfig.history_days()
+HISTORY_INTERVAL = EnvConfig.history_interval()
+
 
 # Daily job runs at 8:30 AM IST on weekdays
 @app.schedule(schedule="0 0 3 * * 1-5", arg_name="dailyTimer", run_on_startup=EnvConfig.test_mode(), use_monitor=False)
 def daily_job(dailyTimer: func.TimerRequest) -> None:
-    DailyScheduler().run()
+    DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run()
 
 # Dynamic NCRONTAB: only as many seconds-per-minute as needed to cover every
 # OPTION_CHAIN_SYMBOLS entry in PARALLEL_BATCH_SIZE-sized batches, e.g.
@@ -419,33 +472,43 @@ if DYNAMIC_OPTION_CHAIN_CRON:
 if __name__ == "__main__":
     logging.info("Function app started")
     if BlobUtils.is_running_locally():
-        logging.info("Running locally")
-        storage_client = MarketDataStorageClient()
-        # Use recursive listing to traverse nested virtual folders and obtain
-        # blob objects (not just names) so downstream helpers can use them
-        folders = storage_client.list_folders_in_container(BlobUtils.MARKET_DATA_CACHE_BLOB)
-        matches = []
-        import fnmatch
-        from pathlib import Path
-        from azure_blob_market_indexer import AzureBlobMarketIndexer
-        for folder in folders:
-            try:
-                if 'option_chain/' not in folder:
-                    continue
+        logging.info("Running locally: executing DailyScheduler for debug")
+        try:
+            ds = DailyScheduler()
+            ds.run()
+            logging.info("DailyScheduler debug run completed")
+        except Exception:
+            logging.exception("DailyScheduler debug run failed")
+        # Continue with existing local helpers (index generation) for convenience
+        try:
+            storage_client = MarketDataStorageClient()
+            # Use recursive listing to traverse nested virtual folders and obtain
+            # blob objects (not just names) so downstream helpers can use them
+            folders = storage_client.list_folders_in_container(BlobUtils.MARKET_DATA_CACHE_BLOB)
+            matches = []
+            import fnmatch
+            from pathlib import Path
+            from azure_blob_market_indexer import AzureBlobMarketIndexer
+            for folder in folders:
+                try:
+                    if 'option_chain/' not in folder:
+                        continue
 
-                blob_objs = storage_client.list_files_in_subfolder(
-                    BlobUtils.MARKET_DATA_CACHE_BLOB, folder, return_blob_objects=True
-                )
-                for blob_obj in blob_objs:
-                    if fnmatch.fnmatch(Path(blob_obj.name).name, 'part-0.parquet'):
-                        matches.append(blob_obj)
-            except Exception as e:
-                print('warning listing', folder, e)
-        logging.info("All folders in %s: %s", BlobUtils.MARKET_DATA_CACHE_BLOB, folders)
-        logging.info("All parquet matches: %s", [getattr(m, 'name', str(m)) for m in matches])
-        if matches:
-            first_blob = matches[0]
-            azure_blob_market_index = AzureBlobMarketIndexer()
-            dst_index_file = azure_blob_market_index.generate_and_upload_index(first_blob)
-            logging.info("Generated and uploaded index file: %s", dst_index_file)
+                    blob_objs = storage_client.list_files_in_subfolder(
+                        BlobUtils.MARKET_DATA_CACHE_BLOB, folder, return_blob_objects=True
+                    )
+                    for blob_obj in blob_objs:
+                        if fnmatch.fnmatch(Path(blob_obj.name).name, 'part-0.parquet'):
+                            matches.append(blob_obj)
+                except Exception as e:
+                    logging.warning('warning listing %s: %s', folder, e)
+            logging.info("All folders in %s: %s", BlobUtils.MARKET_DATA_CACHE_BLOB, folders)
+            logging.info("All parquet matches: %s", [getattr(m, 'name', str(m)) for m in matches])
+            if matches:
+                first_blob = matches[0]
+                azure_blob_market_index = AzureBlobMarketIndexer()
+                dst_index_file = azure_blob_market_index.generate_and_upload_index(first_blob)
+                logging.info("Generated and uploaded index file: %s", dst_index_file)
+        except Exception:
+            logging.exception("Local index generation failed")
 
