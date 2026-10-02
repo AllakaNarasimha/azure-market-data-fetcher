@@ -39,9 +39,8 @@ summary_oi_data.py
 
 # Test suite - only needed at CI/build time (pytest step), never at runtime
 tests/
+summary/
 
-stock_arrival_summary.csv
-test_stock_arrival_summary.csv
 notes.txt
 broker_authenticate.notes.md
 # Only referenced from function_app.py's local `__main__` dev block, never on the

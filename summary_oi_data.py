@@ -131,24 +131,34 @@ def _build_arrival_summary(storage_client: MarketDataStorageClient, blobs: list,
 
         df["localtimestamp"] = pd.to_datetime(df["fetched_at"]) + IST_OFFSET
         df["date"] = df["localtimestamp"].dt.date
+        # Ensure `batch_second` exists in the snapshot; if missing, keep empty
+        if "batch_second" not in df.columns:
+            df["batch_second"] = pd.NA
         # A single fetch snapshot has one row per option contract; collapse to one row per snapshot.
-        snapshots = df.drop_duplicates(subset=["date", "localtimestamp"])[["date", "localtimestamp"]].copy()
+        snapshots = df.drop_duplicates(subset=["date", "localtimestamp"])[["date", "localtimestamp", "batch_second"]].copy()
         snapshots["stock"] = stock
+        blob_name = getattr(blob_obj, "name", str(blob_obj))
+        snapshots["blob_name"] = blob_name
         snapshots = snapshots.sort_values("localtimestamp")
         snapshots["record_seq"] = snapshots.groupby("date").cumcount() + 1
         all_snapshots.append(snapshots)
 
     if not all_snapshots:
-        return pd.DataFrame(columns=["date", "record_seq", "stock", "localtimestamp", "diff"])
+        return pd.DataFrame(columns=["date", "record_seq", "stock", "localtimestamp", "diff", "batch_second", "blob_name"])
 
     result = pd.concat(all_snapshots, ignore_index=True)
     result.sort_values(["date", "stock", "localtimestamp"], inplace=True)
     result["diff"] = result.groupby(["date", "stock"])["localtimestamp"].diff().fillna(pd.Timedelta(0))
     result.sort_values(["date", "localtimestamp"], inplace=True)
-    return result[["date", "record_seq", "stock", "localtimestamp", "diff"]].reset_index(drop=True)
+    return result[["date", "record_seq", "stock", "localtimestamp", "diff", "batch_second", "blob_name"]].reset_index(drop=True)
 
 
-def generate_stock_arrival_summary(output_csv: Optional[str] = None) -> pd.DataFrame:
+def generate_stock_arrival_summary(
+    output_csv: Optional[str] = None,
+    last_recent_days: Optional[int] = None,
+    save_data_local: Optional[str] = None,
+    orig_data_save: bool = False,
+) -> pd.DataFrame:
     """Build a per-day, per-stock arrival-time summary from cached option-chain data.
 
     For every stock's option-chain parquet, takes every distinct `fetched_at`
@@ -166,13 +176,47 @@ def generate_stock_arrival_summary(output_csv: Optional[str] = None) -> pd.DataF
 
     result = _build_arrival_summary(storage_client, blobs, _read_option_chain_parquet)
 
+    # Optionally save the latest parquet (per stock) as CSV locally
+    if save_data_local and not result.empty and orig_data_save:
+        out_dir = Path(save_data_local)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # pick the latest snapshot per stock
+        latest_idx = result.groupby("stock")["localtimestamp"].idxmax()
+        latest_rows = result.loc[latest_idx]
+        for _, row in latest_rows.iterrows():
+            blob_name = row.get("blob_name")
+            stock = row.get("stock")
+            ts = row.get("localtimestamp")
+            if not blob_name:
+                continue
+            try:
+                data = storage_client.fetch_file_content(BlobUtils.MARKET_DATA_CACHE_BLOB, blob_name)
+                df_blob = pd.read_parquet(io.BytesIO(data))
+                safe_stock = re.sub(r"[^A-Za-z0-9_.-]", "_", stock)
+                fname = f"{safe_stock}_{ts.strftime('%Y%m%dT%H%M%S')}.csv"
+                df_blob.to_csv(out_dir / fname, index=False)
+            except Exception:
+                logger.exception("Failed saving parquet blob '%s' for %s", blob_name, stock)
+
+    # If requested, keep only the most recent `last_recent_days` of data
+    if last_recent_days and last_recent_days > 0 and not result.empty:
+        date_series = pd.to_datetime(result["date"])
+        max_dt = date_series.max()
+        cutoff = max_dt - pd.Timedelta(days=last_recent_days - 1)
+        result = result[date_series >= cutoff.normalize()].reset_index(drop=True)
+
     if output_csv:
         result.to_csv(output_csv, index=False)
 
     return result
 
 
-def generate_test_stock_arrival_summary(output_csv: Optional[str] = None) -> pd.DataFrame:
+def generate_test_stock_arrival_summary(
+    output_csv: Optional[str] = None,
+    last_recent_days: Optional[int] = None,
+    save_data_local: Optional[str] = None,
+    orig_data_save: bool = False,
+) -> pd.DataFrame:
     """Same as `generate_stock_arrival_summary`, but reads cached option-chain data
     from the test-mode-data blob container instead of market-data-cache.
 
@@ -184,6 +228,34 @@ def generate_test_stock_arrival_summary(output_csv: Optional[str] = None) -> pd.
 
     result = _build_arrival_summary(storage_client, blobs, _read_test_option_chain_parquet)
 
+    # Optionally save the latest parquet (per stock) as CSV locally
+    if save_data_local and not result.empty and orig_data_save:
+        out_dir = Path(save_data_local)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        latest_idx = result.groupby("stock")["localtimestamp"].idxmax()
+        latest_rows = result.loc[latest_idx]
+        for _, row in latest_rows.iterrows():
+            blob_name = row.get("blob_name")
+            stock = row.get("stock")
+            ts = row.get("localtimestamp")
+            if not blob_name:
+                continue
+            try:
+                data = storage_client.fetch_file_content(BlobUtils.TEST_MODE_CACHE_BLOB, blob_name)
+                df_blob = pd.read_parquet(io.BytesIO(data))
+                safe_stock = re.sub(r"[^A-Za-z0-9_.-]", "_", stock)
+                fname = f"{safe_stock}_{ts.strftime('%Y%m%dT%H%M%S')}.csv"
+                df_blob.to_csv(out_dir / fname, index=False)
+            except Exception:
+                logger.exception("Failed saving test-mode parquet blob '%s' for %s", blob_name, stock)
+
+    # If requested, keep only the most recent `last_recent_days` of data
+    if last_recent_days and last_recent_days > 0 and not result.empty:
+        date_series = pd.to_datetime(result["date"])
+        max_dt = date_series.max()
+        cutoff = max_dt - pd.Timedelta(days=last_recent_days - 1)
+        result = result[date_series >= cutoff.normalize()].reset_index(drop=True)
+
     if output_csv:
         result.to_csv(output_csv, index=False)
 
@@ -192,10 +264,25 @@ def generate_test_stock_arrival_summary(output_csv: Optional[str] = None) -> pd.
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    run_on_test_data = True
+    run_on_test_data = False
+    last_recent_days = 1
+    # Ensure the `sumary` directory exists and store all outputs there
+    out_dir = Path("summary")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     if not run_on_test_data:
-        result = generate_stock_arrival_summary(output_csv="stock_arrival_summary.csv")
+        result = generate_stock_arrival_summary(
+            output_csv=str(out_dir / "stock_arrival_summary.csv"),
+            last_recent_days=last_recent_days,
+            save_data_local=str(out_dir),
+            orig_data_save=True,
+        )
         print(result.to_string(index=False))
     else:
-        result = generate_test_stock_arrival_summary(output_csv="test_stock_arrival_summary.csv")
+        result = generate_test_stock_arrival_summary(
+            output_csv=str(out_dir / "test_stock_arrival_summary.csv"),
+            last_recent_days=last_recent_days,
+            save_data_local=str(out_dir),
+            orig_data_save=True,
+        )
         print(result.to_string(index=False))

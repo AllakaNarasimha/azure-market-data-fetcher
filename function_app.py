@@ -130,7 +130,7 @@ class LiveScheduler:
         self.months = months
         self.max_concurrency = max_concurrency
 
-    def run(self, symbols: Optional[list[str]] = None) -> None:
+    def run(self, symbols: Optional[list[str]] = None, batch_second: Optional[int] = None) -> None:
         ctx = _build_scheduler_context()
 
         # Only allow scheduler execution when within market hours OR when the
@@ -160,11 +160,11 @@ class LiveScheduler:
             chain_cache = OptionChainCacheManager()
 
         target_symbols = symbols if symbols is not None else OPTION_CHAIN_SYMBOLS
-        asyncio.run(self._run_async(target_symbols, chain_cache))
+        asyncio.run(self._run_async(target_symbols, chain_cache, batch_second))
 
         logging.info("=== Execution Completed ===")
 
-    async def _run_async(self, symbols: list[str], chain_cache) -> None:
+    async def _run_async(self, symbols: list[str], chain_cache, batch_second: Optional[int] = None) -> None:
         """Fetch every symbol's option chain concurrently, capped at `max_concurrency` in flight."""
         semaphore = asyncio.Semaphore(self.max_concurrency)
 
@@ -177,7 +177,9 @@ class LiveScheduler:
                     return
 
                 for broker_name, manager in bdm.PreferredBrokers.managers().items():
-                    await asyncio.to_thread(self._fetch_option_chain_range, manager, broker_name, instrument, chain_cache)
+                    await asyncio.to_thread(
+                        self._fetch_option_chain_range, manager, broker_name, instrument, chain_cache, batch_second
+                    )
 
         await asyncio.gather(*(_process_symbol(symbol) for symbol in symbols))
 
@@ -189,7 +191,7 @@ class LiveScheduler:
             return bdm.ExpiryResolver.classify_dates(manager.get_expiry_dates(instrument))
         return []
 
-    def _fetch_option_chain_range(self, manager, broker_name, instrument, chain_cache) -> None:
+    def _fetch_option_chain_range(self, manager, broker_name, instrument, chain_cache, batch_second: Optional[int] = None) -> None:
         today = datetime.now(IST_TZ).strftime("%Y-%m-%d")
         cache_key = (broker_name, instrument.symbol, today)
         expiries = EXPIRIES_CACHE.get(cache_key)
@@ -215,7 +217,9 @@ class LiveScheduler:
 
         if responses:
             try:
-                rows = chain_cache.save_fyers_responses_batch(instrument.symbol, responses, source=broker_name)
+                rows = chain_cache.save_fyers_responses_batch(
+                    instrument.symbol, responses, source=broker_name, fetched_at=None, batch_second=batch_second
+                )
                 logging.info(
                     f"[LiveScheduler] {instrument.symbol} ({broker_name}) option chain cached "
                     f"({rows} rows across {len(responses)} expiries)"
@@ -391,7 +395,7 @@ if DYNAMIC_OPTION_CHAIN_CRON:
             batch_symbols = OPTION_CHAIN_SYMBOLS[start_idx : start_idx + PARALLEL_BATCH_SIZE]
             if not batch_symbols:
                 continue
-            LiveScheduler().run(symbols=batch_symbols)
+            LiveScheduler().run(symbols=batch_symbols, batch_second=sec)
 
 if __name__ == "__main__":
     logging.info("Function app started")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import urllib.parse
 from datetime import date as date_cls
 from datetime import datetime, timedelta
@@ -10,7 +11,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from blob_utils import BlobSync
+from blob_utils import BlobSync, BlobUtils
 from parquet_cache_manager import _local_cache_root
 
 # =====================================================================
@@ -159,6 +160,7 @@ class OptionChainCacheManager:
         source: str = "fyers",
         expiry_timestamp: str = "",
         fetched_at: Optional[datetime] = None,
+        batch_second: Optional[int] = None,
     ) -> int:
         """Flatten and persist a Fyers `optionchain()` response. Returns rows saved."""
         data = response.get("data", {}) if isinstance(response, dict) else {}
@@ -172,6 +174,9 @@ class OptionChainCacheManager:
         df["source"] = source
         df["expiry_timestamp"] = expiry_timestamp
         df["fetched_at"] = fetched_at
+        # Record the scheduler-assigned batch second on each row so downstream
+        # consumers (reports) can see which batch/second produced the snapshot.
+        df["batch_second"] = batch_second
 
         partition = self._partition_path(underlying, fetched_at.date())
         partition.mkdir(parents=True, exist_ok=True)
@@ -188,6 +193,9 @@ class OptionChainCacheManager:
 
         pq.write_table(pa.Table.from_pandas(df, preserve_index=False), file_path)
         self._blob_sync.upload(str(file_path), blob_name)
+
+        # Metadata file intentionally not written or uploaded (batch_second
+        # is recorded directly on the main `part-0.parquet` rows).
 
         expiry_data = data.get("expiryData", [])
         if expiry_data:
@@ -207,6 +215,7 @@ class OptionChainCacheManager:
         responses: list[tuple[dict, str]],
         source: str = "fyers",
         fetched_at: Optional[datetime] = None,
+        batch_second: Optional[int] = None,
     ) -> int:
         """Flatten and persist multiple `optionchain()` responses (one per expiry) for the
         same underlying/day in a single read-modify-write-upload cycle, instead of one per
@@ -227,6 +236,7 @@ class OptionChainCacheManager:
                 df["source"] = source
                 df["expiry_timestamp"] = expiry_timestamp
                 df["fetched_at"] = fetched_at
+                df["batch_second"] = batch_second
                 frames.append(df)
             if data.get("expiryData"):
                 expiry_data = data["expiryData"]
