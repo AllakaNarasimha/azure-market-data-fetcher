@@ -240,10 +240,21 @@ class LiveScheduler:
 
 
 class DailyScheduler:
-    """Daily job: backfill last N-days history + snapshot option chains for the watchlist."""
+    """Daily job: backfill last N-days history + snapshot option chains for the watchlist.
 
-    def __init__(self, history_days: int = 12):
+    New constructor args:
+    - history_days: default days-back used when no explicit history_data_days provided
+    - history_interval: interval string passed to historical data fetch and candle persistence (e.g. '1D')
+
+    Fyers-supported resolutions:
+    - Intraday (minutes): pass the number of minutes as a string, e.g. "1", "2", "3", "5", "10", "15", "30", "60".
+    - Intraday (seconds): append an "S", e.g. "1S", "5S", "10S", "30S" (API support for second-level resolutions may vary).
+    - Daily and higher timeframes: use "1D" for daily candles.
+    """
+
+    def __init__(self, history_days: int = 90, history_interval: str = "1"):
         self.history_days = history_days
+        self.history_interval = history_interval
 
     def run(self) -> None:
         ctx = _build_scheduler_context()
@@ -308,10 +319,9 @@ class DailyScheduler:
 
         logging.info("=== Daily Job Completed ===")
 
-    @staticmethod
-    def _fetch_history_if_missing(manager, broker_name, instrument, candle_cache, start_date, end_date) -> None:
+    def _fetch_history_if_missing(self, manager, broker_name, instrument, candle_cache, start_date, end_date) -> None:
         try:
-            cached = candle_cache.load_candles(instrument.symbol, start_date, end_date, interval="1D")
+            cached = candle_cache.load_candles(instrument.symbol, start_date, end_date, interval=self.history_interval)
             if cached:
                 logging.info(
                     f"[DailyScheduler] {instrument.symbol} ({broker_name}) history already cached "
@@ -320,7 +330,7 @@ class DailyScheduler:
                 return
 
             response = manager.get_historical_data(
-                instrument, "1D", "EQUITY", start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
+                instrument, self.history_interval, "EQUITY", start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
             )
             candles = bdm.HistoryNormalizer.to_candles(broker_name, response)
             if not candles:
@@ -328,7 +338,7 @@ class DailyScheduler:
                 return
 
             candle_cache.clean_and_save_candles(
-                instrument.symbol, candles, interval="1D", fetch_start=start_date, fetch_end=end_date
+                instrument.symbol, candles, interval=self.history_interval, fetch_start=start_date, fetch_end=end_date
             )
             logging.info(
                 f"[DailyScheduler] {instrument.symbol} ({broker_name}) history fetched & cached ({len(candles)} candles)"
