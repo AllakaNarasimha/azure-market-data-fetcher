@@ -22,6 +22,10 @@ local_data/broker_tokens/
 # Local index-generation output written under the "market-data-cache" name at
 # the repo root (was previously misspelled "market_data_cache/" and never matched).
 market-data-cache/
+# Local candle/option-chain parquet cache root (CacheConstants.CACHE_DIR /
+# MARKET_CACHE_DIRNAME) written by ParquetCacheManager/OptionChainCacheManager
+# when running locally - distinct from the hyphenated indexer output above.
+market_data_cache/
 package_extracted/
 test_mode_data/
 summary/

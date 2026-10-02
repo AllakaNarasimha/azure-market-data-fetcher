@@ -1,4 +1,4 @@
-import broker_data_manager as bdm
+import brokers.broker_data_manager as bdm
 
 
 def test_resolve_fetches_dhan_master_when_dhan_is_not_preferred(monkeypatch):

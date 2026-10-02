@@ -1,7 +1,7 @@
 import os
 import logging
 import tempfile
-from blob_utils import BlobUtils, BlobSync
+from utils.blob_utils import BlobUtils, BlobSync
 from azure.core.exceptions import ResourceNotFoundError
 from azure.storage.blob import BlobPrefix
 

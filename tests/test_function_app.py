@@ -2,9 +2,13 @@ import importlib
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 
-from cache_utils import is_test_blob_path, test_blob_name as build_test_blob_name
+import brokers.broker_data_manager as bdm
+from utils.cache_utils import is_test_blob_path, test_blob_name as build_test_blob_name
+from utils.env_config import EnvConfig
+from utils.shared_cache import EXPIRIES_CACHE
 
 def setupDependencies(monkeypatch, minutes: int = 1):
     """Arrange and return the loaded `function_app` module with TEST_MODE enabled.
@@ -20,9 +24,10 @@ def setupDependencies(monkeypatch, minutes: int = 1):
     monkeypatch.setenv("TEST_MODE", "true")
     monkeypatch.setenv("TEST_MODE_MINUTES", str(minutes))
 
-    if "function_app" in sys.modules:
-        del sys.modules["function_app"]
-    import function_app
+    for mod_name in ("function_app", "app_settings"):
+        if mod_name in sys.modules:
+            del sys.modules[mod_name]
+    function_app = importlib.import_module("function_app")
     importlib.reload(function_app)
     return function_app
 
@@ -35,28 +40,29 @@ def test_test_mode_window_resets_on_reload(monkeypatch):
     ist_now = datetime.now(fa.IST_TZ)
     # Use EnvConfig-backed test-mode window state (keeps tests independent
     # of module-level implementation details).
-    assert fa.EnvConfig._TEST_MODE_START is not None
-    assert fa.EnvConfig.get_test_mode_expiry() is not None
+    assert EnvConfig._TEST_MODE_START is not None
+    assert EnvConfig.get_test_mode_expiry() is not None
     # The startup start should be <= now <= expiry
-    assert fa.EnvConfig._TEST_MODE_START <= ist_now <= fa.EnvConfig.get_test_mode_expiry()
+    assert EnvConfig._TEST_MODE_START <= ist_now <= EnvConfig.get_test_mode_expiry()
 
     # Act: simulate expiry by moving expiry to 1 second after start
-    fa.EnvConfig._TEST_MODE_EXPIRY = fa.EnvConfig._TEST_MODE_START + timedelta(seconds=1)
+    EnvConfig._TEST_MODE_EXPIRY = EnvConfig._TEST_MODE_START + timedelta(seconds=1)
     # Assert: simulated time after expiry returns inactive
-    sim_now = fa.EnvConfig._TEST_MODE_START + timedelta(seconds=2)
-    assert not fa.EnvConfig.is_test_mode_active(sim_now)
+    sim_now = EnvConfig._TEST_MODE_START + timedelta(seconds=2)
+    assert not EnvConfig.is_test_mode_active(sim_now)
 
     # Act: simulate host restart (reload module)
-    if "function_app" in sys.modules:
-        del sys.modules["function_app"]
-    import function_app as fa2
+    for mod_name in ("function_app", "app_settings"):
+        if mod_name in sys.modules:
+            del sys.modules[mod_name]
+    fa2 = importlib.import_module("function_app")
     importlib.reload(fa2)
 
     # Assert: after reload the TEST_MODE window is reset into the future
     now2 = datetime.now(fa2.IST_TZ)
-    assert fa2.EnvConfig._TEST_MODE_START is not None
-    assert fa2.EnvConfig.get_test_mode_expiry() is not None
-    assert now2 <= fa2.EnvConfig.get_test_mode_expiry()
+    assert EnvConfig._TEST_MODE_START is not None
+    assert EnvConfig.get_test_mode_expiry() is not None
+    assert now2 <= EnvConfig.get_test_mode_expiry()
 
 
 def test_test_mode_uses_all_days_schedule(monkeypatch):
@@ -84,12 +90,12 @@ def test_option_chain_test_path_routes_to_test_container(monkeypatch):
 
 def test_test_mode_completion_logged_once(monkeypatch, caplog):
     fa = setupDependencies(monkeypatch, minutes=5)
-    expired_at = fa.EnvConfig.get_test_mode_expiry()
+    expired_at = EnvConfig.get_test_mode_expiry()
     now = expired_at + timedelta(seconds=1)
 
     with caplog.at_level(logging.INFO):
-        assert not fa.EnvConfig.is_test_mode_active(now)
-        assert not fa.EnvConfig.is_test_mode_active(now + timedelta(minutes=1))
+        assert not EnvConfig.is_test_mode_active(now)
+        assert not EnvConfig.is_test_mode_active(now + timedelta(minutes=1))
 
     completion_logs = [record for record in caplog.records if "TEST_MODE window completed" in record.message]
     assert len(completion_logs) == 1
@@ -98,8 +104,9 @@ def test_test_mode_completion_logged_once(monkeypatch, caplog):
 def test_daily_prefetch_populates_expiries_cache(monkeypatch):
     fa = setupDependencies(monkeypatch, minutes=5)
 
-    # Use a small, controlled symbol list and fake manager to avoid external calls
-    fa.OPTION_CHAIN_SYMBOLS = ["NSE:TEST-EQ"]
+    # Use a small, controlled symbol list and fake manager to avoid external calls.
+    # DailyScheduler reads symbols via EnvConfig, so override it there (not on `fa`).
+    monkeypatch.setitem(EnvConfig._overrides, "OPTION_CHAIN_SYMBOLS", "NSE:TEST-EQ")
 
     class FakeManager:
         def get_expiries(self, instrument):
@@ -114,23 +121,24 @@ def test_daily_prefetch_populates_expiries_cache(monkeypatch):
     fake_instrument = type("Instr", (), {"symbol": "NSE:TEST-EQ"})()
 
     # Patch resolver and preferred brokers to use our fake objects
-    monkeypatch.setattr(fa.bdm.InstrumentResolver, "resolve", staticmethod(lambda s: fake_instrument))
-    monkeypatch.setattr(fa.bdm.PreferredBrokers, "managers", staticmethod(lambda: {"fyers": FakeManager()}))
+    monkeypatch.setattr(bdm.InstrumentResolver, "resolve", staticmethod(lambda s: fake_instrument))
+    monkeypatch.setattr(bdm.PreferredBrokers, "managers", staticmethod(lambda: {"fyers": FakeManager()}))
 
     # Clear cache, run daily prefetch, and validate cache populated
-    fa.EXPIRIES_CACHE.clear()
+    EXPIRIES_CACHE.clear()
     fa.DailyScheduler().run()
 
     today = datetime.now(fa.IST_TZ).strftime("%Y-%m-%d")
     cache_key = ("fyers", "NSE:TEST-EQ", today)
-    assert cache_key in fa.EXPIRIES_CACHE
-    assert isinstance(fa.EXPIRIES_CACHE[cache_key], list)
+    assert cache_key in EXPIRIES_CACHE
+    assert isinstance(EXPIRIES_CACHE[cache_key], list)
 
 
 def test_daily_prefetch_logs_warning_when_no_expiries(monkeypatch, caplog):
     fa = setupDependencies(monkeypatch, minutes=5)
 
-    fa.OPTION_CHAIN_SYMBOLS = ["NSE:EMPTY-EQ"]
+    # DailyScheduler reads symbols via EnvConfig, so override it there (not on `fa`).
+    monkeypatch.setitem(EnvConfig._overrides, "OPTION_CHAIN_SYMBOLS", "NSE:EMPTY-EQ")
 
     class EmptyManager:
         def get_expiries(self, instrument):
@@ -143,10 +151,10 @@ def test_daily_prefetch_logs_warning_when_no_expiries(monkeypatch, caplog):
             return []
 
     fake_instrument = type("Instr", (), {"symbol": "NSE:EMPTY-EQ"})()
-    monkeypatch.setattr(fa.bdm.InstrumentResolver, "resolve", staticmethod(lambda s: fake_instrument))
-    monkeypatch.setattr(fa.bdm.PreferredBrokers, "managers", staticmethod(lambda: {"fyers": EmptyManager()}))
+    monkeypatch.setattr(bdm.InstrumentResolver, "resolve", staticmethod(lambda s: fake_instrument))
+    monkeypatch.setattr(bdm.PreferredBrokers, "managers", staticmethod(lambda: {"fyers": EmptyManager()}))
 
-    fa.EXPIRIES_CACHE.clear()
+    EXPIRIES_CACHE.clear()
     with caplog.at_level(logging.WARNING):
         fa.DailyScheduler().run()
 
@@ -159,8 +167,6 @@ def test_live_scheduler_fetches_batch_concurrently(monkeypatch):
     not one-by-one, so the broker sees ~5 overlapping calls within the same
     second instead of 5 calls spread out sequentially.
     """
-    import time
-
     fa = setupDependencies(monkeypatch, minutes=5)
 
     symbols = [f"NSE:SYM{i}-EQ" for i in range(5)]
@@ -178,11 +184,11 @@ def test_live_scheduler_fetches_batch_concurrently(monkeypatch):
             time.sleep(call_delay)
             return {"data": {}}
 
-    monkeypatch.setattr(fa.bdm.InstrumentResolver, "resolve", staticmethod(lambda s: type("Instr", (), {"symbol": s})()))
-    monkeypatch.setattr(fa.bdm.PreferredBrokers, "managers", staticmethod(lambda: {"fyers": SlowManager()}))
-    monkeypatch.setattr(fa.bdm.ExpiryResolver, "resolve_range", staticmethod(lambda expiries, weeks, months: ["2026-09-30"]))
+    monkeypatch.setattr(bdm.InstrumentResolver, "resolve", staticmethod(lambda s: type("Instr", (), {"symbol": s})()))
+    monkeypatch.setattr(bdm.PreferredBrokers, "managers", staticmethod(lambda: {"fyers": SlowManager()}))
+    monkeypatch.setattr(bdm.ExpiryResolver, "resolve_range", staticmethod(lambda expiries, weeks, months: ["2026-09-30"]))
 
-    fa.EXPIRIES_CACHE.clear()
+    EXPIRIES_CACHE.clear()
 
     start = time.monotonic()
     fa.LiveScheduler(max_concurrency=5).run(symbols=symbols)

@@ -16,19 +16,24 @@ from typing import Optional
 from azure.core.exceptions import ResourceExistsError
 from azure.storage.blob import BlobServiceClient, ContainerClient
 
-from cache_utils import is_test_blob_path, test_blob_name
-from env_config import EnvConfig
+from utils.cache_utils import is_test_blob_path, test_blob_name
+from utils.env_config import EnvConfig
 
 logger = logging.getLogger(__name__)
 
 
 class BlobUtils:
-    MARKET_DATA_CACHE_BLOB = "market-data-cache"
-    TEST_MODE_CACHE_BLOB = "test-mode-data"
     BROKER_DATA_BLOB = "broker-master"
     BROKER_TOKEN_BLOB = "broker-tokens"
     LOCAL_BLOB_ROOT_ENV = "LOCAL_BLOB_ROOT"
 
+    @staticmethod
+    def market_data_cache_blob() -> str:
+        return EnvConfig.market_data_cache_blob()
+
+    @staticmethod
+    def test_mode_cache_blob() -> str:
+        return EnvConfig.test_mode_cache_blob()
     @staticmethod
     def is_running_locally() -> bool:
         return EnvConfig.website_site_name() is None
@@ -70,8 +75,8 @@ class BlobSync:
         self._container_client = None
         self._test_container_client = None
         if self.is_running_live:
-            self._container_client = BlobUtils.get_container_client(BlobUtils.MARKET_DATA_CACHE_BLOB)
-            self._test_container_client = BlobUtils.get_container_client(BlobUtils.TEST_MODE_CACHE_BLOB)
+            self._container_client = BlobUtils.get_container_client(BlobUtils.market_data_cache_blob())
+            self._test_container_client = BlobUtils.get_container_client(BlobUtils.test_mode_cache_blob())
             if not self._container_client:
                 self.is_running_live = False
 
@@ -101,7 +106,7 @@ class BlobSync:
             container_client = self._ensure_enabled_and_get_container(container_name, op_name=op_name)
             if not container_client:
                 return None, False
-            return container_client, (container_name == BlobUtils.TEST_MODE_CACHE_BLOB)
+            return container_client, (container_name == BlobUtils.test_mode_cache_blob())
 
         container_client, is_test = self._client_for(local_path)
         if not container_client:
@@ -114,7 +119,7 @@ class BlobSync:
         if not is_test:
             return blob_name
         mapped_name = test_blob_name(blob_name)
-        logger.info("[BLOB SYNC] TEST_MODE detected; mapping %s -> %s/%s for local path %s", blob_name, BlobUtils.TEST_MODE_CACHE_BLOB, mapped_name, local_path)
+        logger.info("[BLOB SYNC] TEST_MODE detected; mapping %s -> %s/%s for local path %s", blob_name, BlobUtils.test_mode_cache_blob(), mapped_name, local_path)
         return mapped_name
 
     def download_if_missing(self, local_path: str, blob_name: str, container_name: str | None = None) -> None:
@@ -190,7 +195,7 @@ class BlobSync:
         if not container_client:
             return False
 
-        is_test = (container_name == BlobUtils.TEST_MODE_CACHE_BLOB)
+        is_test = (container_name == BlobUtils.test_mode_cache_blob())
         blob_name = self._resolve_blob_name(blob_name, is_test, local_path=blob_name)
 
         try:

@@ -10,10 +10,9 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from blob_utils import BlobUtils
-from blob_utils import BlobSync
+from utils.blob_utils import BlobUtils, BlobSync
 
-from market_times import MarketTimes
+from utils.market_times import MarketTimes
 
 logger = logging.getLogger(__name__)
 
