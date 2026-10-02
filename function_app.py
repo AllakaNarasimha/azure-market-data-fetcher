@@ -1,5 +1,7 @@
 import logging
+import fnmatch
 from datetime import datetime
+from pathlib import Path
 import azure.functions as func
 
 from utils.blob_utils import BlobUtils
@@ -71,8 +73,8 @@ if __name__ == "__main__":
             # blob objects (not just names) so downstream helpers can use them
             folders = storage_client.list_folders_in_container(BlobUtils.MARKET_DATA_CACHE_BLOB)
             matches = []
-            import fnmatch
-            from pathlib import Path
+            # Deferred: storage/azure_blob_market_indexer.py is excluded from the deploy
+            # package by .funcignore (dev-only), so this must not be a top-level import.
             from storage.azure_blob_market_indexer import AzureBlobMarketIndexer
             for folder in folders:
                 try:

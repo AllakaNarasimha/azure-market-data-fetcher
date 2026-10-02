@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import io
 import logging
-import os
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,6 +13,7 @@ import requests
 
 from brokers.broker_authenticate import BrokerAuth
 from utils.blob_utils import BlobUtils
+from utils.env_config import EnvConfig
 
 logger = logging.getLogger(__name__)
 
@@ -584,7 +584,6 @@ class PreferredBrokers:
     @staticmethod
     def names() -> list[str]:
         # Use EnvConfig to allow tests to override broker preferences
-        from env_config import EnvConfig
         raw = EnvConfig.env("PREFER_BROKERS", "Dhan,Fyers") or "Dhan,Fyers"
         return [b.strip().lower() for b in raw.split(",") if b.strip()]
 

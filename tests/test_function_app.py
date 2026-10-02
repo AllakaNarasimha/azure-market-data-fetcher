@@ -2,6 +2,7 @@ import importlib
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 
 import brokers.broker_data_manager as bdm
@@ -26,7 +27,7 @@ def setupDependencies(monkeypatch, minutes: int = 1):
     for mod_name in ("function_app", "app_settings"):
         if mod_name in sys.modules:
             del sys.modules[mod_name]
-    import function_app
+    function_app = importlib.import_module("function_app")
     importlib.reload(function_app)
     return function_app
 
@@ -54,7 +55,7 @@ def test_test_mode_window_resets_on_reload(monkeypatch):
     for mod_name in ("function_app", "app_settings"):
         if mod_name in sys.modules:
             del sys.modules[mod_name]
-    import function_app as fa2
+    fa2 = importlib.import_module("function_app")
     importlib.reload(fa2)
 
     # Assert: after reload the TEST_MODE window is reset into the future
@@ -166,8 +167,6 @@ def test_live_scheduler_fetches_batch_concurrently(monkeypatch):
     not one-by-one, so the broker sees ~5 overlapping calls within the same
     second instead of 5 calls spread out sequentially.
     """
-    import time
-
     fa = setupDependencies(monkeypatch, minutes=5)
 
     symbols = [f"NSE:SYM{i}-EQ" for i in range(5)]
