@@ -18,8 +18,8 @@ from azure.keyvault.secrets import SecretClient
 from dhanhq import DhanContext, DhanLogin, dhanhq
 from fyers_apiv3 import fyersModel
 
-from blob_utils import BlobUtils
-from env_config import EnvConfig
+from utils.blob_utils import BlobUtils
+from utils.env_config import EnvConfig
 
 logger = logging.getLogger(__name__)
 

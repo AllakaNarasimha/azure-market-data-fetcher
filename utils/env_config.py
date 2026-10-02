@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import List, Optional
@@ -142,3 +143,38 @@ class EnvConfig:
         Examples: '1D', '1', '5', '1S'. Default: '1D'.
         """
         return cls.env("HISTORY_DAYS_INTERVAL", "1") or "1"
+
+    @classmethod
+    def load_local_settings(cls, path: str = "local.settings.json", require_local_run: bool = True) -> bool:
+        """Load `local.settings.json` into overrides when running locally.
+
+        - `path`: path to the local settings file (defaults to `local.settings.json`).
+        - `require_local_run`: when True, only load if BlobUtils.is_running_locally() reports True.
+
+        Returns True if the file was found and loaded (or False otherwise).
+        """
+        try:
+            if require_local_run:
+                # Import locally to avoid import cycles at module import time.
+                from utils.blob_utils import BlobUtils
+
+                if not BlobUtils.is_running_locally():
+                    return False
+        except Exception:
+            if require_local_run:
+                return False
+
+        if not os.path.exists(path):
+            return False
+
+        try:
+            with open(path, "r") as _f:
+                _cfg = json.load(_f)
+                for _k, _v in _cfg.get("Values", {}).items():
+                    if cls.env(_k) is None:
+                        cls.set_override(_k, str(_v))
+            logging.info("Loaded %s into environment overrides for local run", path)
+            return True
+        except Exception:
+            logging.exception("Failed to load %s into environment", path)
+            return False

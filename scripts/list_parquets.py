@@ -14,8 +14,8 @@ import sys
 repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root))
 
-from market_data_storage_client import MarketDataStorageClient
-from blob_utils import BlobUtils
+from storage.market_data_storage_client import MarketDataStorageClient
+from utils.blob_utils import BlobUtils
 
 c = MarketDataStorageClient()
 container = BlobUtils.MARKET_DATA_CACHE_BLOB

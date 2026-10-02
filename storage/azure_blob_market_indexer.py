@@ -7,9 +7,9 @@ import shutil
 from pathlib import Path
 import pandas as pd
 
-from blob_utils import BlobUtils
-from df_utils import DFUtils
-from market_data_storage_client import MarketDataStorageClient
+from utils.blob_utils import BlobUtils
+from utils.df_utils import DFUtils
+from storage.market_data_storage_client import MarketDataStorageClient
 
 logger = logging.getLogger(__name__)
 

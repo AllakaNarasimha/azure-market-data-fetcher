@@ -12,9 +12,8 @@ from typing import Optional
 import pandas as pd
 import requests
 
-from broker_authenticate import BrokerAuth
-from blob_utils import BlobUtils
-from blob_utils import BlobUtils
+from brokers.broker_authenticate import BrokerAuth
+from utils.blob_utils import BlobUtils
 
 logger = logging.getLogger(__name__)
 

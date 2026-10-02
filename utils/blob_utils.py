@@ -16,8 +16,8 @@ from typing import Optional
 from azure.core.exceptions import ResourceExistsError
 from azure.storage.blob import BlobServiceClient, ContainerClient
 
-from cache_utils import is_test_blob_path, test_blob_name
-from env_config import EnvConfig
+from utils.cache_utils import is_test_blob_path, test_blob_name
+from utils.env_config import EnvConfig
 
 logger = logging.getLogger(__name__)
 
