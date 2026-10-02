@@ -11,6 +11,10 @@ resources:
       name: Pipeline-Templates/Pipeline-Templates  
       ref: refs/heads/main
 
+variables:
+  - name: sourceBranchShort
+    value: $[ last(split(variables['Build.SourceBranch'], '/')) ]
+
 stages:
   - template: master-deploy.yml@templates
     parameters:
@@ -19,5 +23,6 @@ stages:
       environmentName: 'Development'
       azureServiceConnection: 'MyAzureConnection'
       sourceBranch: '$(Build.SourceBranch)'
+      sourceBranchShort: '$(sourceBranchShort)'
       sourceVersionMessage: '$(Build.SourceVersionMessage)'
       allowNonMasterDeploy: true
