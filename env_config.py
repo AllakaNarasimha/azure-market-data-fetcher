@@ -121,3 +121,24 @@ class EnvConfig:
     @classmethod
     def get_test_mode_expiry(cls) -> Optional[datetime]:
         return cls._TEST_MODE_EXPIRY
+    
+    @classmethod
+    def history_days(cls) -> int:
+        """Number of days of history to fetch (env `HISTORY_DAYS`).
+
+        Default: 90
+        """
+        raw = cls.env("HISTORY_DAYS", "90") or "90"
+        try:
+            return int(raw)
+        except Exception:
+            logging.warning("Invalid HISTORY_DAYS=%r; using default 90", raw)
+            return 90
+
+    @classmethod
+    def history_interval(cls) -> str:
+        """History interval string (env `HISTORY_DAYS_INTERVAL`).
+
+        Examples: '1D', '1', '5', '1S'. Default: '1D'.
+        """
+        return cls.env("HISTORY_DAYS_INTERVAL", "1") or "1"
