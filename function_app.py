@@ -158,7 +158,11 @@ class LiveScheduler:
             logging.info(f"TEST_MODE after-hours: writing cache to %s", ctx.test_cache_root)
         else:
             chain_cache = OptionChainCacheManager()
-
+        if batch_second is None:
+            try:
+                batch_second = datetime.now(IST_TZ).second
+            except Exception:
+                batch_second = None
         target_symbols = symbols if symbols is not None else OPTION_CHAIN_SYMBOLS
         asyncio.run(self._run_async(target_symbols, chain_cache, batch_second))
 
@@ -329,7 +333,10 @@ class DailyScheduler:
     def _fetch_option_chain(manager, broker_name, instrument, chain_cache) -> None:
         try:
             chain = manager.get_option_chain(instrument, strikecount=10)
-            rows = chain_cache.save_fyers_response(instrument.symbol, chain, source=broker_name)
+            batch_second = datetime.now(IST_TZ).second
+            rows = chain_cache.save_fyers_response(
+                instrument.symbol, chain, source=broker_name, batch_second=batch_second
+            )
             logging.info(f"[DailyScheduler] {instrument.symbol} ({broker_name}) option chain cached ({rows} rows)")
         except Exception:
             logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) option chain fetch failed")
