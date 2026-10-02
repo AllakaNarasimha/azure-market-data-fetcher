@@ -13,7 +13,7 @@ resources:
 
 variables:
   - name: sourceBranchShort
-    value: $[ last(split(variables['Build.SourceBranch'], '/')) ]
+    value: $[ split(variables['Build.SourceBranch'], '/')[sub(length(split(variables['Build.SourceBranch'], '/')), 1)] ]
 
 stages:
   - template: master-deploy.yml@templates
