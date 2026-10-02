@@ -161,6 +161,13 @@ class LiveScheduler:
         if batch_second is None:
             try:
                 batch_second = datetime.now(IST_TZ).second
+                try:
+                    required_seconds = math.ceil(len(OPTION_CHAIN_SYMBOLS) / PARALLEL_BATCH_SIZE) if PARALLEL_BATCH_SIZE > 0 else 0
+                    if required_seconds:
+                        batch_second = batch_second % required_seconds
+                except Exception:
+                    # If anything goes wrong computing required_seconds, leave the raw second.
+                    pass
             except Exception:
                 batch_second = None
         target_symbols = symbols if symbols is not None else OPTION_CHAIN_SYMBOLS
@@ -333,7 +340,12 @@ class DailyScheduler:
     def _fetch_option_chain(manager, broker_name, instrument, chain_cache) -> None:
         try:
             chain = manager.get_option_chain(instrument, strikecount=10)
-            batch_second = datetime.now(IST_TZ).second
+            now_sec = datetime.now(IST_TZ).second
+            try:
+                required_seconds = math.ceil(len(OPTION_CHAIN_SYMBOLS) / PARALLEL_BATCH_SIZE) if PARALLEL_BATCH_SIZE > 0 else 0
+                batch_second = now_sec % required_seconds if required_seconds else now_sec
+            except Exception:
+                batch_second = now_sec
             rows = chain_cache.save_fyers_response(
                 instrument.symbol, chain, source=broker_name, batch_second=batch_second
             )
