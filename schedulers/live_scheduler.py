@@ -49,14 +49,26 @@ class LiveScheduler:
             async with semaphore:
                 try:
                     instrument = await asyncio.to_thread(bdm.InstrumentResolver.resolve, symbol)
-                except Exception:
-                    logging.exception(f"[LiveScheduler] Failed to resolve instrument for {symbol}")
+                except Exception as ex:
+                    logging.exception(f"[LiveScheduler] Failed to resolve instrument for {symbol}: {ex!r}")
                     return
 
-                for broker_name, manager in bdm.PreferredBrokers.managers().items():
-                    await asyncio.to_thread(
-                        self._fetch_option_chain_range, manager, broker_name, instrument, chain_cache, batch_second
-                    )
+                try:
+                    brokers_for_symbol = bdm.PreferredBrokers.managers().items()
+                except Exception as ex:
+                    logging.exception(f"[LiveScheduler] Failed to resolve preferred brokers for {symbol}: {ex!r}")
+                    return
+
+                for broker_name, manager in brokers_for_symbol:
+                    try:
+                        await asyncio.to_thread(
+                            self._fetch_option_chain_range, manager, broker_name, instrument, chain_cache, batch_second
+                        )
+                    except Exception as ex:
+                        # A single broker/symbol failure must not cancel the rest of
+                        # asyncio.gather's in-flight tasks (which would fail the whole
+                        # Azure Functions invocation).
+                        logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) option chain batch failed: {ex!r}")
 
         await asyncio.gather(*(_process_symbol(symbol) for symbol in symbols))
 
@@ -76,11 +88,18 @@ class LiveScheduler:
             try:
                 expiries = self._expiries_for(manager, broker_name, instrument) or []
                 EXPIRIES_CACHE[cache_key] = expiries
-            except Exception:
-                logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to fetch expiries")
+            except Exception as ex:
+                logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to fetch expiries: {ex!r}")
                 return
 
-        expiry_list = bdm.ExpiryResolver.resolve_range(expiries, weeks=self.weeks, months=self.months)
+        expiry_list = []
+        try:
+            expiry_list = bdm.ExpiryResolver.resolve_range(expiries, weeks=self.weeks, months=self.months)
+        except Exception as ex:
+            # Malformed/unexpected expiry entries (missing keys, wrong shape, etc.)
+            # must not abort the whole batch's asyncio.gather - log and skip this symbol.
+            logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to resolve expiry range: {ex!r}")
+            return
 
         responses: list[tuple] = []
         for expiry_ts in expiry_list:
@@ -88,8 +107,8 @@ class LiveScheduler:
                 chain = manager.get_option_chain(instrument, strikecount=self.strikecount, expiries=expiry_ts)
                 responses.append((chain, expiry_ts))
                 logging.info(f"[LiveScheduler] {instrument.symbol} ({broker_name}) option chain fetched for expiry {expiry_ts}")
-            except Exception:
-                logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) option chain fetch failed for expiry {expiry_ts}")
+            except Exception as ex:
+                logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) option chain fetch failed for expiry {expiry_ts}: {ex!r}")
 
         if responses:
             try:
@@ -100,5 +119,5 @@ class LiveScheduler:
                     f"[LiveScheduler] {instrument.symbol} ({broker_name}) option chain cached "
                     f"({rows} rows across {len(responses)} expiries)"
                 )
-            except Exception:
-                logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to save batched option chain")
+            except Exception as ex:
+                logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to save batched option chain: {ex!r}")

@@ -21,7 +21,10 @@ app = func.FunctionApp()
 # Daily job runs at 8:30 AM IST on weekdays
 @app.schedule(schedule="0 0 3 * * 1-5", arg_name="dailyTimer", run_on_startup=TEST_MODE, use_monitor=False)
 def daily_job(dailyTimer: func.TimerRequest) -> None:
-    DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run()
+    try:
+        DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run()
+    except Exception as ex:
+        logging.exception(f"[daily_job] DailyScheduler.run() failed: {ex!r}")
 
 
 if DYNAMIC_OPTION_CHAIN_CRON:
@@ -46,7 +49,10 @@ if DYNAMIC_OPTION_CHAIN_CRON:
             batch_symbols = OPTION_CHAIN_SYMBOLS[start_idx : start_idx + PARALLEL_BATCH_SIZE]
             if not batch_symbols:
                 continue
-            LiveScheduler().run(symbols=batch_symbols, batch_second=sec)
+            try:
+                LiveScheduler().run(symbols=batch_symbols, batch_second=sec)
+            except Exception as ex:
+                logging.exception(f"[option_chain_fetcher] LiveScheduler.run() failed for second {sec}: {ex!r}")
 
 if __name__ == "__main__":
     logging.info("Function app started")

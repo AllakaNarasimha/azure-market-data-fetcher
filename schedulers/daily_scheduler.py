@@ -43,8 +43,8 @@ class DailyScheduler:
         for symbol in symbols:
             try:
                 instrument = bdm.InstrumentResolver.resolve(symbol)
-            except Exception:
-                logging.exception(f"[DailyScheduler] Failed to resolve instrument for {symbol}")
+            except Exception as ex:
+                logging.exception(f"[DailyScheduler] Failed to resolve instrument for {symbol}: {ex!r}")
                 continue
             for broker_name, manager in bdm.PreferredBrokers.managers().items():
                 any_fetched = False
@@ -61,8 +61,8 @@ class DailyScheduler:
         for symbol in option_chain_symbols:
             try:
                 instrument = bdm.InstrumentResolver.resolve(symbol)
-            except Exception:
-                logging.exception(f"[DailyScheduler] Failed to resolve instrument for {symbol}")
+            except Exception as ex:
+                logging.exception(f"[DailyScheduler] Failed to resolve instrument for {symbol}: {ex!r}")
                 continue
 
             for broker_name, manager in bdm.PreferredBrokers.managers().items():
@@ -75,8 +75,8 @@ class DailyScheduler:
                         logging.warning(
                             f"[DailyScheduler] {instrument.symbol} ({broker_name}) expiries not resolved during pre-market prefetch; running here and LiveScheduler will fetch on demand"
                         )
-                except Exception:
-                    logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) failed to prefetch expiries")
+                except Exception as ex:
+                    logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) failed to prefetch expiries: {ex!r}")
 
                 self._fetch_option_chain(manager, broker_name, instrument, chain_cache)
 
@@ -107,8 +107,8 @@ class DailyScheduler:
                 f"[DailyScheduler] {instrument.symbol} ({broker_name}) history fetched & cached ({len(candles)} candles)"
             )
             return True
-        except Exception:
-            logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) history fetch failed")
+        except Exception as ex:
+            logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) history fetch failed: {ex!r}")
             return False
 
     @staticmethod
@@ -128,5 +128,5 @@ class DailyScheduler:
                 instrument.symbol, chain, source=broker_name, batch_second=batch_second
             )
             logging.info(f"[DailyScheduler] {instrument.symbol} ({broker_name}) option chain cached ({rows} rows)")
-        except Exception:
-            logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) option chain fetch failed")
+        except Exception as ex:
+            logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) option chain fetch failed: {ex!r}")
