@@ -4,12 +4,14 @@ from datetime import datetime
 import pytz
 
 import brokers.broker_data_manager as bdm
+from utils.blob_utils import BlobUtils
 from utils.market_times import MarketTimes
 from storage.parquet_cache_manager import ParquetCacheManager
 from storage.market_data_cache import OptionChainCacheManager
 from utils.env_config import EnvConfig
 from utils.shared_cache import EXPIRIES_CACHE
 from schedulers.market_calendar import MarketCalendar
+from schedulers.scheduler_utils import build_scheduler_context
 from schedulers.live_scheduler import LiveScheduler
 
 
@@ -34,8 +36,15 @@ class DailyScheduler:
         symbols = EnvConfig.watchlist_symbols()
         option_chain_symbols = EnvConfig.option_chain_symbols()
 
-        candle_cache = ParquetCacheManager()
-        chain_cache = OptionChainCacheManager()
+        # Route to the test-mode cache root/container when TEST_MODE is active
+        # and the market is closed/holiday, so after-hours test runs don't
+        # pollute the production market-data-cache container.
+        ctx = build_scheduler_context(now, MarketCalendar.is_holiday, BlobUtils.is_running_locally())
+        test_cache_dir = ctx.test_cache_root if ctx.use_test_cache else None
+        if ctx.use_test_cache:
+            logging.info("[DailyScheduler] TEST_MODE after-hours: writing cache to %s", ctx.test_cache_root)
+        candle_cache = ParquetCacheManager(cache_dir=test_cache_dir)
+        chain_cache = OptionChainCacheManager(cache_dir=test_cache_dir)
 
         end_date = datetime.now()
         ranges = MarketCalendar.get_trading_days_back(end_date, days_back=self.history_days)

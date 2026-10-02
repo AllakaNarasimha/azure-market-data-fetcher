@@ -5,10 +5,13 @@ from datetime import datetime
 import pytz
 
 import brokers.broker_data_manager as bdm
+from utils.blob_utils import BlobUtils
 from utils.market_times import MarketTimes
 from storage.market_data_cache import OptionChainCacheManager
 from utils.env_config import EnvConfig
 from utils.shared_cache import EXPIRIES_CACHE
+from schedulers.market_calendar import MarketCalendar
+from schedulers.scheduler_utils import build_scheduler_context
 
 
 class LiveScheduler:
@@ -37,8 +40,13 @@ class LiveScheduler:
 
         target_symbols = symbols if symbols is not None else EnvConfig.option_chain_symbols()
 
-        # Option chain cache manager
-        chain_cache = OptionChainCacheManager()
+        # Route to the test-mode cache root/container when TEST_MODE is active
+        # and the market is closed/holiday, so after-hours test runs don't
+        # pollute the production market-data-cache container.
+        ctx = build_scheduler_context(datetime.now(IST_TZ), MarketCalendar.is_holiday, BlobUtils.is_running_locally())
+        chain_cache = OptionChainCacheManager(cache_dir=ctx.test_cache_root if ctx.use_test_cache else None)
+        if ctx.use_test_cache:
+            logging.info("[LiveScheduler] TEST_MODE after-hours: writing cache to %s", ctx.test_cache_root)
 
         asyncio.run(self._run_async(target_symbols, chain_cache, batch_second))
 
