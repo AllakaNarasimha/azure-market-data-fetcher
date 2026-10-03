@@ -9,6 +9,7 @@ resources:
       type: git
       name: Pipeline-Templates/Pipeline-Templates
       ref: refs/heads/main
+      endpoint: Pipeline-Templates-Connection
 
 variables:
   - name: sourceBranchShort
