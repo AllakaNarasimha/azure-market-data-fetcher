@@ -29,18 +29,28 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Create and start virtual environment
-        run: |
-          python -m venv venv
-          source venv/bin/activate
-
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        # WEBSITE_RUN_FROM_PACKAGE is set to an external blob URL for this app, which
+        # mounts the zip read-only and skips Oryx entirely - deps must already be
+        # vendored into .python_packages/lib/site-packages before zipping, built for
+        # the Function App's Linux runtime (not the GitHub runner's default platform).
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt \
+            --target="${{ github.workspace }}/.python_packages/lib/site-packages" \
+            --platform manylinux2014_x86_64 \
+            --implementation cp \
+            --python-version 3.11 \
+            --only-binary=:all: \
+            --upgrade
 
       # Optional: Add step to run tests here
 
       - name: Zip artifact for deployment
-        run: zip release.zip ./* -r
+        # dotglob is required - the default ./* glob silently skips .python_packages
+        run: |
+          shopt -s dotglob
+          zip release.zip ./* -r
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
@@ -48,7 +58,6 @@ jobs:
           name: python-app
           path: |
             release.zip
-            !venv/
 
   deploy:
     runs-on: ubuntu-latest
