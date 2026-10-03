@@ -7,7 +7,7 @@ name: Build and deploy Python project to Azure Function App - market-data-func
 on:
   push:
     branches:
-      - release
+      - release/*
   workflow_dispatch:
 
 env:
