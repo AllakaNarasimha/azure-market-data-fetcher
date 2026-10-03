@@ -2,27 +2,28 @@ trigger:
   branches:
     include:
       - master
-      
 
 resources:
   repositories:
     - repository: templates
       type: git
-      name: Pipeline-Templates/Pipeline-Templates  
+      name: Pipeline-Templates/Pipeline-Templates
       ref: refs/heads/main
 
 variables:
   - name: sourceBranchShort
     value: $(Build.SourceBranchName)
-
+  - name: sourceVersionMessage
+    value: $(Build.SourceVersionMessage)
+  - name: allowNonMasterDeploy
+    value: 'false'
 stages:
-  - template: master-deploy.yml@templates
-    parameters:
-      techStack: 'python'                                   
-      appName: 'marketdata-func-0916-narasimha'              
-      environmentName: 'Development'
-      azureServiceConnection: 'MyAzureConnection'
-      sourceBranch: '$(Build.SourceBranch)'
-      sourceBranchShort: '$(sourceBranchShort)'
-      sourceVersionMessage: '$(Build.SourceVersionMessage)'
-      allowNonMasterDeploy: true
+
+- template: master-deploy.yml@templates
+  parameters:
+    techStack: 'python'
+    appName: 'marketdata-func-0916-narasimha'
+    sourceBranch: '$(Build.SourceBranch)'
+    sourceBranchShort: '$(sourceBranchShort)'
+    sourceVersionMessage: '$(sourceVersionMessage)'
+    allowNonMasterDeploy: false
