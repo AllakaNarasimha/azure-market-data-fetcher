@@ -13,7 +13,7 @@ import logging
 import os
 from typing import Optional
 
-from azure.core.exceptions import ResourceExistsError
+from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.storage.blob import BlobServiceClient, ContainerClient
 
 from utils.cache_utils import is_test_blob_path, test_blob_name
@@ -140,12 +140,29 @@ class BlobSync:
                 return
             blob_name = self._resolve_blob_name(blob_name, is_test, local_path)
             blob = container_client.get_blob_client(blob_name)
-            if blob.exists():
+            try:
+                exists = blob.exists()
+            except ResourceNotFoundError:
+                self._recreate_container(container_client, blob_name)
+                return
+            if exists:
                 os.makedirs(os.path.dirname(local_path), exist_ok=True)
                 with open(local_path, "wb") as f:
                     f.write(blob.download_blob().readall())
         except Exception:
             logger.exception("[BLOB SYNC] Failed to download %s", blob_name)
+
+    def _recreate_container(self, container_client, blob_name: str) -> bool:
+        """Container was missing at upload/download time; recreate it so the next call can succeed."""
+        try:
+            container_client.create_container()
+        except ResourceExistsError:
+            pass
+        except Exception:
+            logger.exception("[BLOB SYNC] Failed to recreate missing container for %s", blob_name)
+            return False
+        logger.warning("[BLOB SYNC] Container was missing for %s; recreated it", blob_name)
+        return True
 
     def upload(self, local_path: str, blob_name: str, container_name: str | None = None) -> None:
         # Skip when running locally
@@ -157,8 +174,13 @@ class BlobSync:
                 return
             blob_name = self._resolve_blob_name(blob_name, is_test, local_path)
             blob = container_client.get_blob_client(blob_name)
-            with open(local_path, "rb") as f:
-                blob.upload_blob(f.read(), overwrite=True)
+            try:
+                with open(local_path, "rb") as f:
+                    blob.upload_blob(f.read(), overwrite=True)
+            except ResourceNotFoundError:
+                if self._recreate_container(container_client, blob_name):
+                    with open(local_path, "rb") as f:
+                        blob.upload_blob(f.read(), overwrite=True)
         except Exception:
             logger.exception("[BLOB SYNC] Failed to upload %s", blob_name)
 
