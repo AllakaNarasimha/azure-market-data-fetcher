@@ -24,7 +24,8 @@ stages:
 - template: master-deploy.yml@templates
   parameters:
     techStack: 'python'
-    appName: 'marketdata-func-0916-narasimha'
+    appName: 'market-data-func'
+    resourceGroupName: 'rg-marketdata-dev-eastus'
     sourceBranch: '$(Build.SourceBranch)'
     sourceBranchShort: '$(sourceBranchShort)'
     sourceVersionMessage: '$(sourceVersionMessage)'
