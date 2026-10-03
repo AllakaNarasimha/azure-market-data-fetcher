@@ -26,4 +26,4 @@ stages:
     sourceBranch: '$(Build.SourceBranch)'
     sourceBranchShort: '$(sourceBranchShort)'
     sourceVersionMessage: '$(sourceVersionMessage)'
-    allowNonMasterDeploy: '$(allowNonMasterDeploy)'
+    allowNonMasterDeploy: false
