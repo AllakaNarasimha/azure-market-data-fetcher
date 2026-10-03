@@ -69,3 +69,7 @@ build/
 # Misc
 authenticate.log
 broker_authenticate.notes.md
+
+master-deploy.yml
+dev-template.yml
+prod-template.yml

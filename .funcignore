@@ -84,4 +84,8 @@ coverage/
 dist/
 build/
 
+master-deploy.yml
+dev-template.yml
+prod-template.yml
+
 # End of file
