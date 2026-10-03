@@ -1,5 +1,4 @@
 import logging
-import os
 import fnmatch
 from datetime import datetime
 from pathlib import Path
@@ -20,10 +19,6 @@ from app_settings import (
 )
 
 app = func.FunctionApp()
-
-# WEBSITE_SLOT_NAME is set automatically by Azure per deployment slot (e.g. 'dev'
-# or 'Production') - log it at cold start to tell dev/prod instances apart in logs.
-logging.info(f"[startup] Running in slot/environment: {os.getenv('WEBSITE_SLOT_NAME', 'Production')}")
 
 # Daily job runs at 8:30 AM IST on weekdays
 @app.schedule(schedule="0 0 3 * * 1-5", arg_name="dailyTimer", run_on_startup=TEST_MODE, use_monitor=False)

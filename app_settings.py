@@ -39,7 +39,8 @@ DYNAMIC_OPTION_CHAIN_CRON = calculate_dynamic_option_chain_cron(
 
 # Log startup environment for visibility
 logging.info(
-    "Startup env: TEST_MODE=%r, WEBSITE_SITE_NAME=%r",
+    "Startup env: TEST_MODE=%r, WEBSITE_SITE_NAME=%r, WEBSITE_SLOT_NAME=%r",
     EnvConfig.env("TEST_MODE"),
     BlobUtils.website_site_name(),
+    BlobUtils.website_slot_name(),
 )
