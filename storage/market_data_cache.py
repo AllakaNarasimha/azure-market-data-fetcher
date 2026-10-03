@@ -11,8 +11,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from blob_utils import BlobSync, BlobUtils
-from parquet_cache_manager import _local_cache_root
+from utils.blob_utils import BlobSync, BlobUtils
+from storage.parquet_cache_manager import _local_cache_root
 
 # =====================================================================
 # DESIGN NOTES

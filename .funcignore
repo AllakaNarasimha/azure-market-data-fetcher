@@ -16,6 +16,10 @@ test_mode_data/
 # Local index-generation output (mirrors the "market-data-cache" blob container
 # name on disk when AzureBlobMarketIndexer runs locally) - not read by the schedulers.
 market-data-cache/
+# Local candle/option-chain parquet cache root written by ParquetCacheManager/
+# OptionChainCacheManager when running locally - distinct from the hyphenated
+# indexer output above.
+market_data_cache/
 # Manual, standalone dev utilities - not imported by function_app.py's triggers.
 scripts/
 docs/
@@ -45,11 +49,11 @@ notes.txt
 broker_authenticate.notes.md
 # Only referenced from function_app.py's local `__main__` dev block, never on the
 # LiveScheduler/DailyScheduler code path, so not required to host the schedulers.
-azure_blob_market_indexer.py
-# Only consumed by azure_blob_market_indexer.py (see above).
-df_utils.py
+storage/azure_blob_market_indexer.py
+# Only consumed by storage/azure_blob_market_indexer.py (see above).
+utils/df_utils.py
 # Not imported anywhere in the codebase; unused/dead module.
-trading_servicebus_manager.py
+brokers/trading_servicebus_manager.py
 
 # Python cache and test artifacts
 __pycache__/

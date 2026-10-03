@@ -22,10 +22,10 @@ from typing import Optional
 
 import pandas as pd
 
-from blob_utils import BlobUtils
-from cache_utils import MARKET_CACHE_DIRNAME, TEST_CACHE_DIRNAME
-from env_config import EnvConfig
-from market_data_storage_client import MarketDataStorageClient
+from utils.blob_utils import BlobUtils
+from utils.cache_utils import MARKET_CACHE_DIRNAME, TEST_CACHE_DIRNAME
+from utils.env_config import EnvConfig
+from storage.market_data_storage_client import MarketDataStorageClient
 
 logger = logging.getLogger(__name__)
 
@@ -53,14 +53,14 @@ IST_OFFSET = pd.Timedelta(hours=5, minutes=30)
 
 def _gather_option_chain_blobs(storage_client: MarketDataStorageClient) -> list:
     """Collect every option-chain `part-0.parquet` blob across all stocks."""
-    folders = storage_client.list_folders_in_container(BlobUtils.MARKET_DATA_CACHE_BLOB)
+    folders = storage_client.list_folders_in_container(BlobUtils.market_data_cache_blob())
     matches = []
     for folder in folders:
         if OPTION_CHAIN_PREFIX not in folder:
             continue
         try:
-            blob_objs = storage_client.list_files_in_subfolder(
-                BlobUtils.MARKET_DATA_CACHE_BLOB, folder, return_blob_objects=True
+                blob_objs = storage_client.list_files_in_subfolder(
+                BlobUtils.market_data_cache_blob(), folder, return_blob_objects=True
             )
         except Exception:
             logger.exception("Failed listing option-chain blobs under '%s'", folder)
@@ -76,7 +76,7 @@ def _gather_test_option_chain_blobs(storage_client: MarketDataStorageClient) -> 
     """Collect every option-chain `part-0.parquet` blob from the test-mode-data container."""
     try:
         blob_objs = storage_client.list_files_in_subfolder(
-            BlobUtils.TEST_MODE_CACHE_BLOB, TEST_OPTION_CHAIN_PREFIX, return_blob_objects=True
+            BlobUtils.test_mode_cache_blob(), TEST_OPTION_CHAIN_PREFIX, return_blob_objects=True
         )
     except Exception:
         logger.exception("Failed listing option-chain blobs under '%s'", TEST_OPTION_CHAIN_PREFIX)
@@ -99,7 +99,7 @@ def _read_option_chain_parquet(storage_client: MarketDataStorageClient, blob_obj
     if local_path.exists():
         return pd.read_parquet(local_path)
 
-    data = storage_client.fetch_file_content(BlobUtils.MARKET_DATA_CACHE_BLOB, blob_name)
+    data = storage_client.fetch_file_content(BlobUtils.market_data_cache_blob(), blob_name)
     return pd.read_parquet(io.BytesIO(data))
 
 
@@ -111,7 +111,7 @@ def _read_test_option_chain_parquet(storage_client: MarketDataStorageClient, blo
     if local_path.exists():
         return pd.read_parquet(local_path)
 
-    data = storage_client.fetch_file_content(BlobUtils.TEST_MODE_CACHE_BLOB, blob_name)
+    data = storage_client.fetch_file_content(BlobUtils.test_mode_cache_blob(), blob_name)
     return pd.read_parquet(io.BytesIO(data))
 
 
@@ -190,7 +190,7 @@ def generate_stock_arrival_summary(
             if not blob_name:
                 continue
             try:
-                data = storage_client.fetch_file_content(BlobUtils.MARKET_DATA_CACHE_BLOB, blob_name)
+                data = storage_client.fetch_file_content(BlobUtils.market_data_cache_blob(), blob_name)
                 df_blob = pd.read_parquet(io.BytesIO(data))
                 safe_stock = re.sub(r"[^A-Za-z0-9_.-]", "_", stock)
                 fname = f"{safe_stock}_{ts.strftime('%Y%m%dT%H%M%S')}.csv"
@@ -241,7 +241,7 @@ def generate_test_stock_arrival_summary(
             if not blob_name:
                 continue
             try:
-                data = storage_client.fetch_file_content(BlobUtils.TEST_MODE_CACHE_BLOB, blob_name)
+                data = storage_client.fetch_file_content(BlobUtils.test_mode_cache_blob(), blob_name)
                 df_blob = pd.read_parquet(io.BytesIO(data))
                 safe_stock = re.sub(r"[^A-Za-z0-9_.-]", "_", stock)
                 fname = f"{safe_stock}_{ts.strftime('%Y%m%dT%H%M%S')}.csv"
