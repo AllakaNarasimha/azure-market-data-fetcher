@@ -1,7 +1,13 @@
 import os
 import json
+import logging
 import threading
 from azure.servicebus import ServiceBusClient, ServiceBusMessage
+
+from utils.blob_utils import BlobUtils
+
+logger = logging.getLogger(__name__)
+
 
 class TradingTopics:
     RAW_CANDLE = "raw-candle"
@@ -29,7 +35,13 @@ class TradingServiceBusManager:
         try:
             with cls._client.get_topic_sender(topic_name=topic_name) as sender:
                 sender.send_messages(ServiceBusMessage(json.dumps(payload)))
-                print(f"Successfully published message to topic: {topic_name}")
+                logger.info(
+                    "Published message to topic: %s (ENVIRONMENT=%r, WEBSITE_SLOT_NAME=%r)",
+                    topic_name, BlobUtils.environment(), BlobUtils.website_slot_name(),
+                )
         except Exception as e:
-            print(f"Error publishing to {topic_name}: {str(e)}")
+            logger.error(
+                "Error publishing to %s (ENVIRONMENT=%r, WEBSITE_SLOT_NAME=%r): %s",
+                topic_name, BlobUtils.environment(), BlobUtils.website_slot_name(), str(e),
+            )
             raise e

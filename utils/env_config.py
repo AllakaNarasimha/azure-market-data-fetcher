@@ -75,6 +75,10 @@ class EnvConfig:
         return cls.env("WEBSITE_SLOT_NAME", "Production") or "Production"
 
     @classmethod
+    def environment(cls) -> str:
+        return cls.env("ENVIRONMENT", "prod") or "prod"
+
+    @classmethod
     def market_storage_connection(cls) -> Optional[str]:
         return cls.env("MARKET_STORAGE_CONNECTION")
 

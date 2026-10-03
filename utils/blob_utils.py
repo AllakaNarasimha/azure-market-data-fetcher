@@ -46,6 +46,10 @@ class BlobUtils:
     def website_slot_name() -> str:
         return EnvConfig.website_slot_name()
 
+    @staticmethod
+    def environment() -> str:
+        return EnvConfig.environment()
+
 
     @staticmethod
     def get_container_client(container_name: str, connection_string: Optional[str] = None) -> Optional[ContainerClient]:
