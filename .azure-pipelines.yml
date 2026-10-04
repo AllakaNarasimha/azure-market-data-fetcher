@@ -9,7 +9,7 @@ resources:
     - repository: templates
       type: git
       name: Pipeline-Templates/Pipeline-Templates
-      ref: refs/heads/chore/generalize-pipeline-templates
+      ref: refs/heads/main
       endpoint: Pipeline-Templates-Connection
 
 variables:
