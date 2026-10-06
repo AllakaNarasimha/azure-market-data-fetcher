@@ -20,41 +20,57 @@ from app_settings import (
 
 app = func.FunctionApp()
 
-# Daily job runs at 8:30 AM IST on weekdays
-@app.schedule(schedule="0 0 3 * * 1-5", arg_name="dailyTimer", run_on_startup=TEST_MODE, use_monitor=False)
-def daily_job(dailyTimer: func.TimerRequest) -> None:
-    try:
-        DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run()
-    except Exception as ex:
-        logging.exception(f"[daily_job] DailyScheduler.run() failed: {ex!r}")
+@app.route(
+    route="health",
+    methods=["GET"],
+    auth_level=func.AuthLevel.ANONYMOUS
+)
+def health(req: func.HttpRequest) -> func.HttpResponse:
+    return func.HttpResponse(
+        body='{"status":"ok","service":"market-data-func"}',
+        status_code=200,
+        mimetype="application/json"
+    )
+
+ENABLE_BACKGROUND_TRIGGERS = False
+
+if ENABLE_BACKGROUND_TRIGGERS:
+    # Daily job runs at 8:30 AM IST on weekdays
+    @app.schedule(schedule="0 0 3 * * 1-5", arg_name="dailyTimer", run_on_startup=TEST_MODE, use_monitor=False)
+    def daily_job(dailyTimer: func.TimerRequest) -> None:
+        try:
+            DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run()
+        except Exception as ex:
+            logging.exception(f"[daily_job] DailyScheduler.run() failed: {ex!r}")
 
 
-if DYNAMIC_OPTION_CHAIN_CRON:
-    @app.schedule(schedule=DYNAMIC_OPTION_CHAIN_CRON, arg_name="chainTimer", run_on_startup=TEST_MODE, use_monitor=False)
-    def option_chain_fetcher(chainTimer: func.TimerRequest) -> None:
-        now = datetime.now(IST_TZ)
-        current_second = now.second
-        target_seconds = [current_second]
+if ENABLE_BACKGROUND_TRIGGERS:
+    if DYNAMIC_OPTION_CHAIN_CRON:
+        @app.schedule(schedule=DYNAMIC_OPTION_CHAIN_CRON, arg_name="chainTimer", run_on_startup=TEST_MODE, use_monitor=False)
+        def option_chain_fetcher(chainTimer: func.TimerRequest) -> None:
+            now = datetime.now(IST_TZ)
+            current_second = now.second
+            target_seconds = [current_second]
 
-        # Catch up on any seconds missed within the same minute (e.g. cold start delay).
-        if chainTimer.past_due and chainTimer.schedule_status and chainTimer.schedule_status.last:
-            try:
-                last_run = datetime.fromisoformat(str(chainTimer.schedule_status.last))
-                if last_run.minute == now.minute and last_run.second < current_second:
-                    target_seconds = list(range(last_run.second + 1, current_second + 1))
-                    logging.warning(f"[LiveScheduler] Timer past due; catching up seconds {target_seconds}")
-            except Exception:
-                logging.exception("[LiveScheduler] Failed parsing schedule_status.last")
+            # Catch up on any seconds missed within the same minute (e.g. cold start delay).
+            if chainTimer.past_due and chainTimer.schedule_status and chainTimer.schedule_status.last:
+                try:
+                    last_run = datetime.fromisoformat(str(chainTimer.schedule_status.last))
+                    if last_run.minute == now.minute and last_run.second < current_second:
+                        target_seconds = list(range(last_run.second + 1, current_second + 1))
+                        logging.warning(f"[LiveScheduler] Timer past due; catching up seconds {target_seconds}")
+                except Exception:
+                    logging.exception("[LiveScheduler] Failed parsing schedule_status.last")
 
-        for sec in target_seconds:
-            start_idx = sec * PARALLEL_BATCH_SIZE
-            batch_symbols = OPTION_CHAIN_SYMBOLS[start_idx : start_idx + PARALLEL_BATCH_SIZE]
-            if not batch_symbols:
-                continue
-            try:
-                LiveScheduler().run(symbols=batch_symbols, batch_second=sec)
-            except Exception as ex:
-                logging.exception(f"[option_chain_fetcher] LiveScheduler.run() failed for second {sec}: {ex!r}")
+            for sec in target_seconds:
+                start_idx = sec * PARALLEL_BATCH_SIZE
+                batch_symbols = OPTION_CHAIN_SYMBOLS[start_idx : start_idx + PARALLEL_BATCH_SIZE]
+                if not batch_symbols:
+                    continue
+                try:
+                    LiveScheduler().run(symbols=batch_symbols, batch_second=sec)
+                except Exception as ex:
+                    logging.exception(f"[option_chain_fetcher] LiveScheduler.run() failed for second {sec}: {ex!r}")
 
 if __name__ == "__main__":
     logging.info("Function app started")
