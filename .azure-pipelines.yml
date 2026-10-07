@@ -8,7 +8,7 @@ resources:
   repositories:
     - repository: templates
       type: git
-      name: Pipeline-Templates/Pipeline-Templates
+      name: Shared-Project/Pipeline-Templates
       ref: refs/heads/main
       endpoint: Pipeline-Templates-Connection
 
