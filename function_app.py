@@ -32,7 +32,7 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
         mimetype="application/json"
     )
 
-ENABLE_BACKGROUND_TRIGGERS = False
+ENABLE_BACKGROUND_TRIGGERS = True
 
 if ENABLE_BACKGROUND_TRIGGERS:
     # Daily job runs at 8:30 AM IST on weekdays
