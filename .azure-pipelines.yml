@@ -30,3 +30,4 @@ stages:
     sourceBranchShort: '$(sourceBranchShort)'
     sourceVersionMessage: '$(sourceVersionMessage)'
     allowNonMasterDeploy: false
+    installAzureDataToolkit: true
