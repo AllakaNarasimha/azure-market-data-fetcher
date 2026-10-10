@@ -67,7 +67,8 @@ class MasterFileCache:
             resp = requests.get(download_url, timeout=30)
             resp.raise_for_status()
             # Upload into the dated blob path
-            self._blob_sync.upload_content(self.CONTAINER, blob_path, resp.content)
+            if not self._blob_sync.upload_content(self.CONTAINER, blob_path, resp.content):
+                raise RuntimeError(f"Failed to cache {self.CONTAINER}/{blob_path}")
             return resp.content
         except Exception:
             # As a last resort, fetch directly from the URL
