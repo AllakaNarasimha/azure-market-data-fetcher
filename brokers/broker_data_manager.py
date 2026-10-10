@@ -12,7 +12,7 @@ import pandas as pd
 import requests
 
 from brokers.broker_authenticate import BrokerAuth
-from utils.blob_utils import BlobUtils
+from utils.blob_utils import BlobSync, BlobUtils
 from utils.env_config import EnvConfig
 
 logger = logging.getLogger(__name__)
@@ -31,9 +31,7 @@ class MasterFileCache:
     def __init__(self, local_dir: Path):
         self.is_local = BlobUtils.is_running_locally()
         self.local_dir = local_dir
-        self._container_client = None
-        if not self.is_local:
-            self._container_client = BlobUtils.get_container_client(self.CONTAINER)
+        self._blob_sync = BlobSync()
 
     def get(self, filename: str, download_url: str) -> bytes:
         # Store master files under a date-specific subfolder so each day has
@@ -52,7 +50,7 @@ class MasterFileCache:
             path.write_bytes(resp.content)
             return path.read_bytes()
 
-        if not self._container_client:
+        if not self._blob_sync.get_container(self.CONTAINER):
             logger.warning("MARKET_STORAGE_CONNECTION not set; fetching %s without caching", filename)
             resp = requests.get(download_url, timeout=30)
             resp.raise_for_status()
@@ -61,15 +59,15 @@ class MasterFileCache:
         # For blob storage, use a dated blob path so each day's file is stored
         # under a DDMMYYYY prefix. This mirrors the local-folder behavior.
         blob_path = f"{today_folder}/{filename}"
-        blob = self._container_client.get_blob_client(blob_path)
         try:
-            if blob.exists():
-                return blob.download_blob().readall()
+            cached = self._blob_sync.read_if_exists(self.CONTAINER, blob_path)
+            if cached is not None:
+                return cached
 
             resp = requests.get(download_url, timeout=30)
             resp.raise_for_status()
             # Upload into the dated blob path
-            blob.upload_blob(resp.content, overwrite=True)
+            self._blob_sync.upload_content(self.CONTAINER, blob_path, resp.content)
             return resp.content
         except Exception:
             # As a last resort, fetch directly from the URL
