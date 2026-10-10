@@ -14,7 +14,7 @@ import os
 from typing import Optional
 
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
-from azure.storage.blob import BlobServiceClient, ContainerClient
+from azure.storage.blob import BlobPrefix, BlobServiceClient, ContainerClient
 
 from utils.cache_utils import is_test_blob_path, test_blob_name
 from utils.env_config import EnvConfig
@@ -77,14 +77,16 @@ class BlobUtils:
 
 
 class BlobSync:
-    def __init__(self):
+    def __init__(self, connection_string: Optional[str] = None):
+        self._connection_string = connection_string
+        self._containers: dict[str, Optional[ContainerClient]] = {}
         self._is_running_locally = BlobUtils.is_running_locally()
         self.is_running_live = not self._is_running_locally
         self._container_client = None
         self._test_container_client = None
         if self.is_running_live:
-            self._container_client = BlobUtils.get_container_client(BlobUtils.market_data_cache_blob())
-            self._test_container_client = BlobUtils.get_container_client(BlobUtils.test_mode_cache_blob())
+            self._container_client = self.get_container(BlobUtils.market_data_cache_blob())
+            self._test_container_client = self.get_container(BlobUtils.test_mode_cache_blob())
             if not self._container_client:
                 self.is_running_live = False
 
@@ -98,7 +100,7 @@ class BlobSync:
             logger.warning("[BLOB SYNC] %s skipped: BlobSync disabled (local run)", op_name)
             return None
 
-        container_client = BlobUtils.get_container_client(container_name)
+        container_client = self.get_container(container_name)
         if not container_client:
             logger.warning("[BLOB SYNC] No container client available for container '%s'", container_name)
             return None
@@ -220,9 +222,12 @@ class BlobSync:
         Returns True if upload was attempted (and likely succeeded), False
         if BlobSync is disabled or the container client cannot be obtained.
         """
-        # Ensure BlobSync is enabled and a container client is available
-        container_client = self._ensure_enabled_and_get_container(container_name, op_name="upload_content")
+        if self._is_running_locally:
+            logger.warning("[BLOB SYNC] upload_content skipped: BlobSync disabled (local run)")
+            return False
+        container_client = self.get_container(container_name)
         if not container_client:
+            logger.warning("[BLOB SYNC] No container client available for container '%s'", container_name)
             return False
 
         is_test = (container_name == BlobUtils.test_mode_cache_blob())
@@ -236,3 +241,60 @@ class BlobSync:
         except Exception:
             logger.exception("[BLOB SYNC] Failed to upload content to %s/%s", container_name, blob_name)
             return False
+
+    def upload_content_with_fallback(self, container_name: str, blob_name: str, data: bytes, overwrite: bool = True) -> None:
+        """Upload bytes using the storage client's existing two-attempt flow.
+
+        First use upload_content (including its test-container path mapping).
+        If it returns False or raises, acquire a fresh container client and
+        upload to the original, unmapped blob name. That second destination is
+        intentional: it preserves the legacy MarketDataStorageClient fallback.
+        Final failures propagate to the caller; other upload_content callers
+        retain their existing boolean-return behavior.
+
+        Local filesystem writes remain the storage client's responsibility.
+        """
+        try:
+            if self.upload_content(container_name, blob_name, data, overwrite=overwrite):
+                return
+        except Exception:
+            logger.exception("[BLOB SYNC] upload_content failed; attempting fallback upload to %s/%s", container_name, blob_name)
+
+        try:
+            container_client = BlobUtils.get_container_client(container_name, self._connection_string)
+            if not container_client:
+                raise RuntimeError(f"Upload of '{blob_name}' to container '{container_name}' failed: no container client")
+            container_client.get_blob_client(blob_name).upload_blob(data, overwrite=overwrite)
+            logger.info("[BLOB SYNC] Uploaded content via fallback to %s/%s", container_name, blob_name)
+        except Exception:
+            logger.exception("[BLOB SYNC] Fallback upload failed for %s/%s", container_name, blob_name)
+            raise
+
+    def get_container(self, container_name: str) -> Optional[ContainerClient]:
+        if container_name not in self._containers:
+            self._containers[container_name] = BlobUtils.get_container_client(container_name, self._connection_string)
+        return self._containers[container_name]
+
+    def _require_container(self, container_name: str) -> ContainerClient:
+        container_client = self.get_container(container_name)
+        if not container_client:
+            raise RuntimeError(f"No storage connection; cannot access container '{container_name}'")
+        return container_client
+
+    def read_content(self, container_name: str, blob_name: str) -> bytes:
+        """Download a blob's bytes. Raises ResourceNotFoundError when the blob is missing."""
+        return self._require_container(container_name).get_blob_client(blob_name).download_blob().readall()
+
+    def read_if_exists(self, container_name: str, blob_name: str) -> Optional[bytes]:
+        try:
+            return self.read_content(container_name, blob_name)
+        except ResourceNotFoundError:
+            return None
+
+    def list_blobs(self, container_name: str, prefix: str = "") -> list:
+        return list(self._require_container(container_name).list_blobs(name_starts_with=prefix or None))
+
+    def list_prefixes(self, container_name: str, prefix: str = "") -> list[str]:
+        """Immediate virtual folders under `prefix`."""
+        blobs = self._require_container(container_name).walk_blobs(name_starts_with=prefix or None, delimiter="/")
+        return [item.name for item in blobs if isinstance(item, BlobPrefix)]

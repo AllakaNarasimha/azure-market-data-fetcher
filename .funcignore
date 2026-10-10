@@ -6,6 +6,7 @@ venv/
 
 # Local configuration and secrets
 local.settings.json
+requirements-local.txt
 .env/
 .azure-personal/
 
