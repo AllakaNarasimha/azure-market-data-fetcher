@@ -22,9 +22,8 @@ class MarketDataStorageClient:
         Initialize with an explicit connection string or fall back to the
         centralized `BlobUtils.get_blob_connection_string()`.
 
-        Note: this class intentionally avoids keeping a BlobServiceClient
-        instance. Container clients are acquired via `BlobUtils.get_container_client`
-        so the dependency on `azure.storage.blob.BlobServiceClient` is removed.
+        Azure operations are delegated to BlobSync, which owns container-client
+        acquisition and the compatibility upload fallback.
         """
         # Prefer an explicit connection string, else use centralized getter
         self._connection_string = connection_string or BlobUtils.get_blob_connection_string()
@@ -131,25 +130,10 @@ class MarketDataStorageClient:
         Virtual subfolders are created automatically if specified in the blob_path.
         """
         try:
-            # If running in Azure, prefer using BlobSync.upload_content to centralize
-            # upload behavior. BlobSync will use the connection string from
-            # BlobUtils.get_blob_connection_string(). If BlobSync is disabled or
-            # fails, fall back to direct container upload or local emulator.
+            # BlobSync owns both Azure upload attempts and final failure reporting.
             if not BlobUtils.is_running_locally():
-                try:
-                    uploaded = self._blob_sync.upload_content(container_name, blob_path, data, overwrite=overwrite)
-                    if uploaded:
-                        logger.info(f"Successfully uploaded data to '%s' in container '%s' via BlobSync.", blob_path, container_name)
-                        return
-                except Exception:
-                    logger.exception("BlobSync.upload_content failed; attempting direct upload")
-
-                # BlobSync didn't upload; try direct container client
-                container_client = BlobUtils.get_container_client(container_name, self._connection_string)
-                if not container_client:
-                    raise RuntimeError(f"Upload of '{blob_path}' to container '{container_name}' failed: no container client")
-                container_client.get_blob_client(blob_path).upload_blob(data, overwrite=overwrite)
-                logger.info(f"Successfully uploaded data to '%s' in container '%s' via direct client.", blob_path, container_name)
+                self._blob_sync.upload_content_with_fallback(container_name, blob_path, data, overwrite=overwrite)
+                logger.info("Successfully uploaded data to '%s' in container '%s' via BlobSync.", blob_path, container_name)
                 return
 
             # Local fallback: write to a local directory mirroring the blob path

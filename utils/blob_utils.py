@@ -242,6 +242,34 @@ class BlobSync:
             logger.exception("[BLOB SYNC] Failed to upload content to %s/%s", container_name, blob_name)
             return False
 
+    def upload_content_with_fallback(self, container_name: str, blob_name: str, data: bytes, overwrite: bool = True) -> None:
+        """Upload bytes using the storage client's existing two-attempt flow.
+
+        First use upload_content (including its test-container path mapping).
+        If it returns False or raises, acquire a fresh container client and
+        upload to the original, unmapped blob name. That second destination is
+        intentional: it preserves the legacy MarketDataStorageClient fallback.
+        Final failures propagate to the caller; other upload_content callers
+        retain their existing boolean-return behavior.
+
+        Local filesystem writes remain the storage client's responsibility.
+        """
+        try:
+            if self.upload_content(container_name, blob_name, data, overwrite=overwrite):
+                return
+        except Exception:
+            logger.exception("[BLOB SYNC] upload_content failed; attempting fallback upload to %s/%s", container_name, blob_name)
+
+        try:
+            container_client = BlobUtils.get_container_client(container_name, self._connection_string)
+            if not container_client:
+                raise RuntimeError(f"Upload of '{blob_name}' to container '{container_name}' failed: no container client")
+            container_client.get_blob_client(blob_name).upload_blob(data, overwrite=overwrite)
+            logger.info("[BLOB SYNC] Uploaded content via fallback to %s/%s", container_name, blob_name)
+        except Exception:
+            logger.exception("[BLOB SYNC] Fallback upload failed for %s/%s", container_name, blob_name)
+            raise
+
     def get_container(self, container_name: str) -> Optional[ContainerClient]:
         if container_name not in self._containers:
             self._containers[container_name] = BlobUtils.get_container_client(container_name, self._connection_string)
