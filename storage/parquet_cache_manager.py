@@ -444,7 +444,11 @@ class ParquetCacheManager:
             df["year"] = dt_series.dt.year.astype("int16")
             df["month"] = dt_series.dt.month.astype("int8")
 
-            df = self._merge_with_existing_data(symbol, interval, df)
+            # Remote upsert reads and merges under the toolkit's write lock.
+            # Sending a premerged snapshot could replay stale cached values over
+            # another writer's corrections. Local files still need this merge.
+            if BlobUtils.is_running_locally():
+                df = self._merge_with_existing_data(symbol, interval, df)
 
             self._write_partitions(symbol, interval, df)
             return True
