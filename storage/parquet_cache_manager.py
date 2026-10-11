@@ -11,6 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from utils.blob_utils import BlobUtils, BlobSync
+from azure_data_toolkit import WriteOutcomeUnknown
 
 from utils.market_times import MarketTimes
 
@@ -189,7 +190,7 @@ class CacheRegistry:
 
             if not BlobUtils.is_running_locally():
                 with self._blob_sync.open_parquet(self.registry_path) as lake:
-                    lake.upsert(self.BLOB_NAME, df, keys=CacheConstants.REGISTRY_COLUMNS)
+                    lake.upsert(self.BLOB_NAME, new_row, keys=CacheConstants.REGISTRY_COLUMNS)
                 logger.info("[REGISTRY] %s | %s | %s → %s | %s", symbol, interval, start_dt, end_dt, reason)
                 return
 
@@ -201,6 +202,8 @@ class CacheRegistry:
             self._blob_sync.upload(self.registry_path, self.BLOB_NAME)
 
             logger.info("[REGISTRY] %s | %s | %s → %s | %s", symbol, interval, start_dt, end_dt, reason)
+        except WriteOutcomeUnknown:
+            raise
         except Exception as exc:
             logger.warning("[REGISTRY] Failed to save log: %s", exc)
 
@@ -385,7 +388,10 @@ class ParquetCacheManager:
         self,
         cache_dir: Optional[str] = None,
         market_session: Optional[MarketSession] = None,
+        *, revision_col: Optional[str] = None, schema: Optional[pa.Schema] = None,
     ):
+        self.revision_col = revision_col
+        self.schema = schema
         self.cache_dir = os.path.abspath(cache_dir or _local_cache_root(CacheConstants.CACHE_DIR))
         os.makedirs(self.cache_dir, exist_ok=True)
 
@@ -452,6 +458,8 @@ class ParquetCacheManager:
 
             self._write_partitions(symbol, interval, df)
             return True
+        except WriteOutcomeUnknown:
+            raise
         except Exception as exc:
             logger.warning("[PARQUET] Failed to save %s: %s", symbol, exc)
             return False
@@ -502,6 +510,8 @@ class ParquetCacheManager:
 
             cleaned = df.to_dict("records")
             return self.save_candles(symbol, cleaned, interval, fetch_start, fetch_end)
+        except WriteOutcomeUnknown:
+            raise
         except Exception as exc:
             logger.warning("[PARQUET] clean_and_save_candles failed for %s: %s", symbol, exc)
             return False
@@ -791,6 +801,9 @@ class ParquetCacheManager:
 
             result = pd.concat([existing, result], ignore_index=True)
 
+        if self.revision_col:
+            from azure_data_toolkit import merge_frames
+            result = merge_frames(pd.DataFrame(), result, ["timestamp"], revision_col=self.revision_col)
         return (
             result.drop_duplicates(subset=["timestamp"], keep="last")
             .sort_values("timestamp")
@@ -822,7 +835,7 @@ class ParquetCacheManager:
 
             if not BlobUtils.is_running_locally():
                 with self._blob_sync.open_parquet(self.cache_dir) as lake:
-                    lake.upsert(blob_name, write_df, keys=["timestamp"])
+                    lake.upsert(blob_name, write_df, keys=["timestamp"], revision_col=self.revision_col, schema=self.schema)
                 continue
 
             partition_path = self._partition_path(symbol, interval, int(year), int(month))

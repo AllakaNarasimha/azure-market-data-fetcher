@@ -109,9 +109,12 @@ class DailyScheduler:
                 logging.warning(f"[DailyScheduler] {instrument.symbol} ({broker_name}) history response had no candles")
                 return False
 
-            candle_cache.clean_and_save_candles(
+            saved = candle_cache.clean_and_save_candles(
                 instrument.symbol, candles, interval=self.history_interval, fetch_start=start_date, fetch_end=end_date
             )
+            if not saved:
+                logging.warning("[DailyScheduler] History cache write did not succeed for %s", instrument.symbol)
+                return False
             logging.info(
                 f"[DailyScheduler] {instrument.symbol} ({broker_name}) history fetched & cached ({len(candles)} candles)"
             )

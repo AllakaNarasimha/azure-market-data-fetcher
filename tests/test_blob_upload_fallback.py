@@ -11,7 +11,9 @@ from utils.blob_utils import BlobSync, BlobUtils
 
 @pytest.fixture
 def upload_setup(monkeypatch):
-    monkeypatch.setattr(BlobUtils, "is_running_locally", lambda: False)
+    # Legacy SDK mode retains its historical fallback contract.
+    monkeypatch.setattr(BlobSync, "_delta_lake_enabled", staticmethod(lambda: False))
+    monkeypatch.setattr(BlobUtils, "is_running_locally", staticmethod(lambda: False))
     monkeypatch.setattr(BlobUtils, "test_mode_cache_blob", lambda: "test-cache")
     primary = Mock()
     fallback = Mock()
