@@ -118,7 +118,9 @@ def test_write_read_overwrite_append_upsert(blob_lake, format, path):
     with blob_lake.open() as lake:
         lake.write(path, pd.DataFrame({"id": [1, 2], "value": [10, 20]}), format=format)
         assert lake.read(path, format=format).sort_values("id").value.tolist() == [10, 20]
-        lake.write(path, pd.DataFrame({"id": [3], "value": [30]}), format=format, mode="append")
+        with pytest.raises(ValueError, match="append requires keys"):
+            lake.write(path, pd.DataFrame({"id": [3], "value": [30]}), format=format, mode="append")
+        lake.upsert(path, pd.DataFrame({"id": [3], "value": [30]}), keys=["id"], format=format)
         lake.upsert(path, pd.DataFrame({"id": [2, 4, 4], "value": [22, 40, 44]}), keys=["id"], format=format)
         result = lake.read(path, format=format).sort_values("id")
         assert result.id.tolist() == [1, 2, 3, 4]
@@ -141,6 +143,38 @@ def test_missing_parquet_and_invalid_paths(blob_lake):
         for path in ("/absolute.parquet", "../escape.parquet", "a//b.parquet", ""):
             with pytest.raises(ValueError):
                 lake.read(path)
+
+
+def test_consumer_reconciles_committed_write_without_replay(blob_lake, monkeypatch):
+    from utils.storage_contracts import ParquetAccess
+    from azure_data_toolkit import WriteOutcomeUnknown
+    with blob_lake.open() as lake:
+        original = lake.upsert
+        calls = []
+        def commit_then_timeout(*args, **kwargs):
+            calls.append(1)
+            original(*args, **kwargs)
+            raise WriteOutcomeUnknown('Injected lost response after real commit')
+        monkeypatch.setattr(lake, 'upsert', commit_then_timeout)
+        access = ParquetAccess(lake)
+        data = blob_lake.pd.DataFrame({'id': [1], 'value': [10]})
+        access.upsert('consumer/reconcile.parquet', data, keys=['id'])
+        assert calls == [1]
+        assert access.read('consumer/reconcile.parquet').to_dict('list') == data.to_dict('list')
+
+
+def test_consumer_revision_and_contract(blob_lake):
+    from utils.storage_contracts import ParquetAccess
+    with blob_lake.open() as lake:
+        access = ParquetAccess(lake)
+        path = 'candles/consumer/part-0.parquet'
+        data = blob_lake.pd.DataFrame({'timestamp': [1791526500], 'open': [10], 'high': [15], 'low': [9], 'close': [14], 'volume': [100], 'revision': [3]})
+        access.upsert(path, data, keys=['timestamp'], revision_col='revision')
+        old = data.assign(close=11, revision=2)
+        access.upsert(path, old, keys=['timestamp'], revision_col='revision')
+        with pytest.raises(ValueError, match='Missing dataset fields'):
+            access.upsert(path, old.drop(columns='volume'), keys=['timestamp'], revision_col='revision')
+        assert access.read(path).close.tolist() == [14]
 
 
 def test_filters_time_range_and_sort(blob_lake):

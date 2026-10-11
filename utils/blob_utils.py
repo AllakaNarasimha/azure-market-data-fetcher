@@ -22,6 +22,7 @@ from azure.storage.blob import BlobPrefix, BlobServiceClient, ContainerClient
 
 from utils.cache_utils import is_test_blob_path, test_blob_name
 from utils.env_config import EnvConfig
+from utils.storage_contracts import ParquetAccess, contract_for
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +190,7 @@ class BlobSync:
             return True
         except Exception:
             logger.exception("[BLOB SYNC] DataLake parquet download failed for %s/%s", container_name, blob_name)
-            return False
+            raise
 
     def _upload_parquet_via_data_lake(self, container_name: str, blob_name: str, local_path: str) -> bool:
         import pandas as pd
@@ -197,7 +198,7 @@ class BlobSync:
         dataframe = pd.read_parquet(local_path)
         with self.open_data_lake(container_name) as lake:
             # File uploads replace a complete snapshot; keys belong to callers.
-            lake.write(blob_name, dataframe, mode="overwrite")
+            ParquetAccess(lake).write(blob_name, dataframe, mode="overwrite")
         return True
 
     def download_if_missing(self, local_path: str, blob_name: str, container_name: str | None = None) -> None:
@@ -227,6 +228,8 @@ class BlobSync:
                     f.write(blob.download_blob().readall())
         except Exception:
             logger.exception("[BLOB SYNC] Failed to download %s", blob_name)
+            if self._is_parquet_path(local_path) and self._delta_lake_enabled():
+                raise
 
     def _recreate_container(self, container_client, blob_name: str) -> bool:
         """Container was missing at upload/download time; recreate it so the next call can succeed."""
@@ -307,6 +310,9 @@ class BlobSync:
         if self._is_running_locally:
             logger.warning("[BLOB SYNC] upload_content skipped: BlobSync disabled (local run)")
             return False
+        if self._is_parquet_path(blob_name) and self._delta_lake_enabled():
+            self._upload_parquet_content(container_name, blob_name, data, overwrite)
+            return True
         container_client = self.get_container(container_name)
         if not container_client:
             logger.warning("[BLOB SYNC] No container client available for container '%s'", container_name)
@@ -325,9 +331,10 @@ class BlobSync:
             return False
 
     def upload_content_with_fallback(self, container_name: str, blob_name: str, data: bytes, overwrite: bool = True) -> None:
-        """Upload bytes using the storage client's existing two-attempt flow.
+        """Upload Parquet through the shared backend; retain legacy fallback otherwise.
 
-        First use upload_content (including its test-container path mapping).
+        For non-Parquet or explicitly disabled SDK mode, first use upload_content
+        (including its test-container path mapping).
         If it returns False or raises, acquire a fresh container client and
         upload to the original, unmapped blob name. That second destination is
         intentional: it preserves the legacy MarketDataStorageClient fallback.
@@ -336,6 +343,12 @@ class BlobSync:
 
         Local filesystem writes remain the storage client's responsibility.
         """
+        if self._is_parquet_path(blob_name) and self._delta_lake_enabled():
+            if self._is_running_locally:
+                raise RuntimeError("Remote Parquet upload disabled for local runs")
+            self._upload_parquet_content(container_name, blob_name, data, overwrite)
+            return
+
         try:
             if self.upload_content(container_name, blob_name, data, overwrite=overwrite):
                 return
@@ -351,6 +364,26 @@ class BlobSync:
         except Exception:
             logger.exception("[BLOB SYNC] Fallback upload failed for %s/%s", container_name, blob_name)
             raise
+
+    def _upload_parquet_content(self, container_name, blob_name, data, overwrite):
+        import pandas as pd
+        dataframe = pd.read_parquet(io.BytesIO(data))
+        contract = contract_for(blob_name)
+        if contract:
+            contract.validate(dataframe)
+        mapped = self._resolve_blob_name(
+            blob_name, container_name == BlobUtils.test_mode_cache_blob(), blob_name,
+        )
+        with self.open_data_lake(container_name) as lake:
+            if overwrite:
+                ParquetAccess(lake).write(mapped, dataframe)
+            else:
+                # Toolkit write() is replacement-only. Retain create-only byte
+                # uploads using its identical shared lock and commit checks.
+                full = lake._path(mapped)
+                with lake._lock(full).acquire() as lost:
+                    blob = self._require_container(container_name).get_blob_client(mapped)
+                    lake._commit(lambda: blob.upload_blob(data, overwrite=False), lost, full)
 
     @contextmanager
     def open_data_lake(self, container_name: str, prefix: str = "") -> Iterator[Any]:
@@ -370,6 +403,8 @@ class BlobSync:
         with data_lake_class(
             account_name=account_name, container=container_name,
             prefix=prefix, account_key=account_key,
+            require_append_keys=True,
+            app_id=EnvConfig.env("BLOB_SYNC_APP_ID", "azure-market-data-fetcher"),
         ) as lake:
             yield lake
 
@@ -386,9 +421,10 @@ class BlobSync:
         prefix = "market_data_cache" if is_test else ""
         if self._delta_lake_enabled():
             with self.open_data_lake(client.container_name, prefix=prefix) as lake:
-                yield lake
+                yield ParquetAccess(lake)
         else:
-            yield _ParquetBlobBackend(client, prefix)
+            logger.warning("[BLOB SYNC] Legacy SDK mode has no shared-writer coordination")
+            yield ParquetAccess(_ParquetBlobBackend(client, prefix), shared=False)
 
     def get_container(self, container_name: str) -> Optional[ContainerClient]:
         if container_name not in self._containers:

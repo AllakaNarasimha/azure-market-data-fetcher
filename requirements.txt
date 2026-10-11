@@ -13,3 +13,4 @@ dhanhq==2.2.0
 fyers-apiv3==3.1.18
 pytest==9.1.1
 azure-servicebus==7.14.3
+azure-data-toolkit @ git+https://github.com/AllakaNarasimha/azure-data-toolkit.git@cdb9b0b541b7c30c88a075a73803c2bbdbe286f8
