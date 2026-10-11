@@ -98,6 +98,8 @@ class BlobSync:
         self._containers: dict[str, Optional[ContainerClient]] = {}
         self._is_running_locally = BlobUtils.is_running_locally()
         self.is_running_live = not self._is_running_locally
+        self._delta_lake_is_enabled = self._delta_lake_enabled()
+        self._data_lake_class_ref = self._data_lake_class()
         self._container_client = None
         self._test_container_client = None
         if self.is_running_live:
@@ -105,6 +107,13 @@ class BlobSync:
             self._test_container_client = self.get_container(BlobUtils.test_mode_cache_blob())
             if not self._container_client:
                 self.is_running_live = False
+        logger.info(
+            "[BLOB SYNC] initialized: live=%s local=%s delta_enabled=%s delta_available=%s",
+            self.is_running_live,
+            self._is_running_locally,
+            self._delta_lake_is_enabled,
+            self._data_lake_class_ref is not None,
+        )
 
     def _client_for(self, local_path: str):
         if is_test_blob_path(local_path, self._is_running_locally):
