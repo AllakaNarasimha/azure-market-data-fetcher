@@ -136,6 +136,15 @@ class CacheRegistry:
         self._blob_sync = BlobSync()
 
     def load(self) -> pd.DataFrame:
+        if not BlobUtils.is_running_locally():
+            try:
+                with self._blob_sync.open_parquet(self.registry_path) as lake:
+                    df = lake.read(self.BLOB_NAME, missing_ok=True)
+                if df is not None and not df.empty:
+                    return df
+            except Exception as exc:
+                logger.warning("[REGISTRY] Failed to read registry from DataLake: %s", exc)
+
         self._blob_sync.download_if_missing(self.registry_path, self.BLOB_NAME)
         if (
             os.path.exists(self.registry_path)
@@ -177,6 +186,12 @@ class CacheRegistry:
                 subset=CacheConstants.REGISTRY_COLUMNS,
                 keep="last",
             )
+
+            if not BlobUtils.is_running_locally():
+                with self._blob_sync.open_parquet(self.registry_path) as lake:
+                    lake.upsert(self.BLOB_NAME, df, keys=CacheConstants.REGISTRY_COLUMNS)
+                logger.info("[REGISTRY] %s | %s | %s → %s | %s", symbol, interval, start_dt, end_dt, reason)
+                return
 
             df.to_parquet(
                 self.registry_path,
@@ -494,7 +509,7 @@ class ParquetCacheManager:
         end_date: datetime,
         interval: str = "5",
     ) -> List[Dict]:
-        if not os.path.exists(self.cache_dir) or not os.listdir(self.cache_dir):
+        if BlobUtils.is_running_locally() and (not os.path.exists(self.cache_dir) or not os.listdir(self.cache_dir)):
             return []
 
         try:
@@ -798,13 +813,20 @@ class ParquetCacheManager:
         directory this writes to always matches exactly what `_load_partition` reads.
         """
         for (year, month), group in df.groupby(["year", "month"]):
+            write_df = group.drop(columns=["symbol", "interval", "year", "month"], errors="ignore")
+            blob_name = self._blob_name(symbol, interval, int(year), int(month))
+
+            if not BlobUtils.is_running_locally():
+                with self._blob_sync.open_parquet(self.cache_dir) as lake:
+                    lake.upsert(blob_name, write_df, keys=["timestamp"])
+                continue
+
             partition_path = self._partition_path(symbol, interval, int(year), int(month))
             os.makedirs(partition_path, exist_ok=True)
-            write_df = group.drop(columns=["symbol", "interval", "year", "month"], errors="ignore")
             table = pa.Table.from_pandas(write_df, preserve_index=False)
             file_path = os.path.join(partition_path, "part-0.parquet")
             pq.write_table(table, file_path)
-            self._blob_sync.upload(file_path, self._blob_name(symbol, interval, int(year), int(month)))
+            self._blob_sync.upload(file_path, blob_name)
 
     def _load_partition(
         self,
@@ -813,6 +835,15 @@ class ParquetCacheManager:
         year: int,
         month: int,
     ) -> pd.DataFrame:
+        if not BlobUtils.is_running_locally():
+            try:
+                with self._blob_sync.open_parquet(self.cache_dir) as lake:
+                    df = lake.read(self._blob_name(symbol, interval, year, month), missing_ok=True)
+                return df if df is not None else pd.DataFrame()
+            except Exception as exc:
+                logger.warning("[PARQUET] Failed to read remote partition for %s/%s %04d-%02d: %s", symbol, interval, year, month, exc)
+                return pd.DataFrame()
+
         partition_path = self._partition_path(symbol, interval, year, month)
         file_path = os.path.join(partition_path, "part-0.parquet")
         self._blob_sync.download_if_missing(file_path, self._blob_name(symbol, interval, year, month))

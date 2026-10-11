@@ -10,8 +10,12 @@ part of the app wrote it, and any container name change happens in one spot.
 from __future__ import annotations
 
 import logging
+import io
 import os
-from typing import Optional
+from contextlib import contextmanager
+from importlib import import_module
+from pathlib import Path
+from typing import Any, Iterator, Optional
 
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.storage.blob import BlobPrefix, BlobServiceClient, ContainerClient
@@ -26,6 +30,7 @@ class BlobUtils:
     BROKER_DATA_BLOB = "broker-master"
     BROKER_TOKEN_BLOB = "broker-tokens"
     LOCAL_BLOB_ROOT_ENV = "LOCAL_BLOB_ROOT"
+    DELTA_LAKE_ENABLED_ENV = "BLOB_SYNC_ENABLE_DELTA_LAKE"
 
     @staticmethod
     def market_data_cache_blob() -> str:
@@ -74,6 +79,17 @@ class BlobUtils:
         Centralized so callers don't read EnvConfig directly.
         """
         return EnvConfig.market_storage_connection()
+
+    @staticmethod
+    def get_connection_string_parts(connection_string: Optional[str] = None) -> dict[str, str]:
+        conn_str = connection_string or EnvConfig.market_storage_connection() or ""
+        parts: dict[str, str] = {}
+        for segment in conn_str.split(";"):
+            if "=" not in segment:
+                continue
+            key, value = segment.split("=", 1)
+            parts[key] = value
+        return parts
 
 
 class BlobSync:
@@ -132,6 +148,49 @@ class BlobSync:
         logger.info("[BLOB SYNC] TEST_MODE detected; mapping %s -> %s/%s for local path %s", blob_name, BlobUtils.test_mode_cache_blob(), mapped_name, local_path)
         return mapped_name
 
+    @staticmethod
+    def _is_parquet_path(path_value: str) -> bool:
+        return str(path_value).lower().endswith(".parquet")
+
+    @staticmethod
+    def _data_lake_class() -> Any | None:
+        try:
+            module = import_module("azure_data_toolkit")
+            return getattr(module, "DataLake", None)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _delta_lake_enabled() -> bool:
+        raw = EnvConfig.env(BlobUtils.DELTA_LAKE_ENABLED_ENV, "true") or "true"
+        return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+    def _write_parquet_locally(self, local_path: str, dataframe: Any) -> None:
+        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+        dataframe.to_parquet(local_path, index=False)
+
+    def _download_parquet_via_data_lake(self, container_name: str, blob_name: str, local_path: str) -> bool:
+        try:
+            with self.open_data_lake(container_name) as lake:
+                dataframe = lake.read(blob_name, missing_ok=True)
+            if dataframe is None or (dataframe.empty and len(dataframe.columns) == 0):
+                return True
+            self._write_parquet_locally(local_path, dataframe)
+            logger.info("[BLOB SYNC] Downloaded parquet via DataLake from %s/%s", container_name, blob_name)
+            return True
+        except Exception:
+            logger.exception("[BLOB SYNC] DataLake parquet download failed for %s/%s", container_name, blob_name)
+            return False
+
+    def _upload_parquet_via_data_lake(self, container_name: str, blob_name: str, local_path: str) -> bool:
+        import pandas as pd
+
+        dataframe = pd.read_parquet(local_path)
+        with self.open_data_lake(container_name) as lake:
+            # File uploads replace a complete snapshot; keys belong to callers.
+            lake.write(blob_name, dataframe, mode="overwrite")
+        return True
+
     def download_if_missing(self, local_path: str, blob_name: str, container_name: str | None = None) -> None:
         # Skip when running locally or when the file already exists
         if not self.is_running_live or os.path.exists(local_path):
@@ -141,6 +200,12 @@ class BlobSync:
             if not container_client:
                 return
             blob_name = self._resolve_blob_name(blob_name, is_test, local_path)
+            resolved_container_name = container_name or container_client.container_name
+
+            if self._is_parquet_path(local_path) and self._is_parquet_path(blob_name) and self._delta_lake_enabled():
+                if self._download_parquet_via_data_lake(resolved_container_name, blob_name, local_path):
+                    return
+
             blob = container_client.get_blob_client(blob_name)
             try:
                 exists = blob.exists()
@@ -175,6 +240,12 @@ class BlobSync:
             if not container_client:
                 return
             blob_name = self._resolve_blob_name(blob_name, is_test, local_path)
+            resolved_container_name = container_name or container_client.container_name
+
+            if self._is_parquet_path(local_path) and self._is_parquet_path(blob_name) and self._delta_lake_enabled():
+                self._upload_parquet_via_data_lake(resolved_container_name, blob_name, local_path)
+                return
+
             blob = container_client.get_blob_client(blob_name)
             try:
                 with open(local_path, "rb") as f:
@@ -185,6 +256,8 @@ class BlobSync:
                         blob.upload_blob(f.read(), overwrite=True)
         except Exception:
             logger.exception("[BLOB SYNC] Failed to upload %s", blob_name)
+            if self._is_parquet_path(local_path) and self._is_parquet_path(blob_name) and self._delta_lake_enabled():
+                raise
 
     def rename_blob_folder(self, container_name: str, old_folder_path: str, new_folder_path: str) -> bool:
         # Ensure BlobSync is enabled and a container client is available
@@ -270,6 +343,44 @@ class BlobSync:
             logger.exception("[BLOB SYNC] Fallback upload failed for %s/%s", container_name, blob_name)
             raise
 
+    @contextmanager
+    def open_data_lake(self, container_name: str, prefix: str = "") -> Iterator[Any]:
+        if not self._delta_lake_enabled():
+            raise RuntimeError("Delta Lake integration is disabled by environment")
+
+        data_lake_class = self._data_lake_class()
+        if data_lake_class is None:
+            raise RuntimeError("azure-data-toolkit is not installed; DataLake integration is unavailable")
+
+        parts = BlobUtils.get_connection_string_parts(self._connection_string)
+        account_name = parts.get("AccountName")
+        account_key = parts.get("AccountKey")
+        if not account_name or not account_key:
+            raise RuntimeError("MARKET_STORAGE_CONNECTION must include AccountName and AccountKey for DataLake access")
+
+        with data_lake_class(
+            account_name=account_name, container=container_name,
+            prefix=prefix, account_key=account_key,
+        ) as lake:
+            yield lake
+
+    @contextmanager
+    def open_parquet(self, local_path: str, container_name: str | None = None) -> Iterator[Any]:
+        """Resolve cache routing and select the configured Parquet backend.
+
+        Toolkit errors propagate; they must never trigger an unlocked overwrite.
+        SDK mode is selected only when the integration is explicitly disabled.
+        """
+        client, is_test = self._resolve_container(local_path, container_name, "open_parquet")
+        if client is None:
+            raise RuntimeError("No storage connection available for Parquet access")
+        prefix = "market_data_cache" if is_test else ""
+        if self._delta_lake_enabled():
+            with self.open_data_lake(client.container_name, prefix=prefix) as lake:
+                yield lake
+        else:
+            yield _ParquetBlobBackend(client, prefix)
+
     def get_container(self, container_name: str) -> Optional[ContainerClient]:
         if container_name not in self._containers:
             self._containers[container_name] = BlobUtils.get_container_client(container_name, self._connection_string)
@@ -298,3 +409,46 @@ class BlobSync:
         """Immediate virtual folders under `prefix`."""
         blobs = self._require_container(container_name).walk_blobs(name_starts_with=prefix or None, delimiter="/")
         return [item.name for item in blobs if isinstance(item, BlobPrefix)]
+
+
+class _ParquetBlobBackend:
+    """Legacy SDK backend, used only when toolkit integration is disabled."""
+
+    def __init__(self, container: ContainerClient, prefix: str):
+        self._container = container
+        self._prefix = prefix
+
+    def _blob(self, path: str):
+        name = f"{self._prefix}/{path}" if self._prefix else path
+        return self._container.get_blob_client(name)
+
+    def read(self, path: str, *, missing_ok: bool = False):
+        import pandas as pd
+
+        try:
+            content = self._blob(path).download_blob().readall()
+        except ResourceNotFoundError:
+            if missing_ok:
+                return pd.DataFrame()
+            raise
+        return pd.read_parquet(io.BytesIO(content))
+
+    def write(self, path: str, data: Any, *, mode: str = "overwrite") -> None:
+        if mode != "overwrite":
+            raise ValueError("Use upsert for merged writes")
+        out = io.BytesIO()
+        data.to_parquet(out, index=False)
+        self._blob(path).upload_blob(out.getvalue(), overwrite=True)
+
+    def upsert(self, path: str, data: Any, *, keys: list[str]) -> None:
+        import pandas as pd
+
+        if data.empty:
+            return
+        if not keys or any(key not in data.columns for key in keys):
+            raise ValueError("Explicit business keys required")
+        if data[keys].isna().any().any():
+            raise ValueError("Business keys cannot be null")
+        current = self.read(path, missing_ok=True)
+        merged = pd.concat([current, data], ignore_index=True)
+        self.write(path, merged.drop_duplicates(subset=keys, keep="last"))
