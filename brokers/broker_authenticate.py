@@ -18,7 +18,7 @@ from azure.keyvault.secrets import SecretClient
 from dhanhq import DhanContext, DhanLogin, dhanhq
 from fyers_apiv3 import fyersModel
 
-from utils.blob_utils import BlobUtils
+from utils.blob_utils import BlobSync, BlobUtils
 from utils.env_config import EnvConfig
 
 logger = logging.getLogger(__name__)
@@ -88,19 +88,15 @@ class TokenCache:
 
     def __init__(self):
         self.is_local = BlobUtils.is_running_locally()
-        self._container_client = None
-        if not self.is_local:
-            self._container_client = BlobUtils.get_container_client(BlobUtils.BROKER_TOKEN_BLOB)
+        self._blob_sync = BlobSync()
 
     def load(self, broker: str) -> Optional[dict]:
         try:
             if self.is_local:
                 path = self.LOCAL_DIR / f"{broker}.json"
                 return json.loads(path.read_text()) if path.exists() else None
-            if not self._container_client:
-                return None
-            blob = self._container_client.get_blob_client(f"{broker}.json")
-            return json.loads(blob.download_blob().readall())
+            data = self._blob_sync.read_if_exists(BlobUtils.BROKER_TOKEN_BLOB, f"{broker}.json")
+            return json.loads(data) if data else None
         except Exception:
             return None
 
@@ -110,11 +106,8 @@ class TokenCache:
                 self.LOCAL_DIR.mkdir(parents=True, exist_ok=True)
                 (self.LOCAL_DIR / f"{broker}.json").write_text(json.dumps(token_data))
                 return
-            if not self._container_client:
-                logger.warning("MARKET_STORAGE_CONNECTION not set; skipping %s token cache", broker)
-                return
-            blob = self._container_client.get_blob_client(f"{broker}.json")
-            blob.upload_blob(json.dumps(token_data), overwrite=True)
+            if not self._blob_sync.upload_content(BlobUtils.BROKER_TOKEN_BLOB, f"{broker}.json", json.dumps(token_data).encode()):
+                logger.warning("BlobSync unavailable; skipping %s token cache", broker)
         except Exception:
             logger.exception("Failed to cache %s token", broker)
 

@@ -5,6 +5,8 @@ import sys
 import time
 from datetime import datetime, timedelta
 
+import pytest
+
 import brokers.broker_data_manager as bdm
 from utils.cache_utils import is_test_blob_path, test_blob_name as build_test_blob_name
 from utils.env_config import EnvConfig
@@ -74,6 +76,8 @@ def test_test_mode_uses_all_days_schedule(monkeypatch):
 def test_daily_timer_runs_on_startup_in_test_mode(monkeypatch):
     fa = setupDependencies(monkeypatch, minutes=5)
     functions = {function.get_function_name(): function for function in fa.app.get_functions()}
+    if "daily_job" not in functions:
+        pytest.skip("ENABLE_BACKGROUND_TRIGGERS is False; daily_job not registered")
     daily_binding = functions["daily_job"].get_bindings_dict()["bindings"][0]
 
     assert daily_binding["runOnStartup"] is True
@@ -200,4 +204,48 @@ def test_live_scheduler_fetches_batch_concurrently(monkeypatch):
     # All 5 calls should have started within the same short window (i.e. "same second"),
     # not staggered call_delay apart from each other.
     assert max(call_starts) - min(call_starts) < call_delay
+
+
+def test_background_triggers_registered(monkeypatch):
+    fa = setupDependencies(monkeypatch, minutes=5)
+    functions = {function.get_function_name(): function for function in fa.app.get_functions()}
+
+    assert "daily_job" in functions
+    assert "option_chain_fetcher" in functions
+
+    daily_binding = functions["daily_job"].get_bindings_dict()["bindings"][0]
+    assert daily_binding["schedule"] == "0 0 3 * * 1-5"
+
+    chain_binding = functions["option_chain_fetcher"].get_bindings_dict()["bindings"][0]
+    assert chain_binding["schedule"] == fa.DYNAMIC_OPTION_CHAIN_CRON
+
+
+def test_option_chain_fetcher_batches_symbols(monkeypatch):
+    fa = setupDependencies(monkeypatch, minutes=5)
+    symbols = [f"NSE:SYM{i}-EQ" for i in range(fa.PARALLEL_BATCH_SIZE * 60)]
+    monkeypatch.setattr(fa, "OPTION_CHAIN_SYMBOLS", symbols)
+
+    calls = []
+
+    class RecordingScheduler:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self, symbols=None, batch_second=None):
+            calls.append((list(symbols), batch_second))
+
+    monkeypatch.setattr(fa, "LiveScheduler", RecordingScheduler)
+
+    class FakeTimer:
+        past_due = False
+        schedule_status = None
+
+    chain_fn = {f.get_function_name(): f for f in fa.app.get_functions()}["option_chain_fetcher"].get_user_function()
+    chain_fn(FakeTimer())
+
+    assert len(calls) == 1
+    batch_symbols, batch_second = calls[0]
+    assert 0 <= batch_second < 60
+    assert 0 < len(batch_symbols) <= fa.PARALLEL_BATCH_SIZE
+    assert all(s in symbols for s in batch_symbols)
 
