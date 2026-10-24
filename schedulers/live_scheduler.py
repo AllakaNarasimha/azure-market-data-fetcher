@@ -11,7 +11,7 @@ from storage.market_data_cache import OptionChainCacheManager
 from utils.env_config import EnvConfig
 from utils.shared_cache import EXPIRIES_CACHE
 from schedulers.market_calendar import MarketCalendar
-from schedulers.scheduler_utils import build_scheduler_context
+from schedulers.scheduler_utils import build_scheduler_context, is_market_open
 
 
 class LiveScheduler:
@@ -43,7 +43,12 @@ class LiveScheduler:
         # Route to the test-mode cache root/container when TEST_MODE is active
         # and the market is closed/holiday, so after-hours test runs don't
         # pollute the production market-data-cache container.
-        ctx = build_scheduler_context(datetime.now(IST_TZ), MarketCalendar.is_holiday, BlobUtils.is_running_locally())
+        now = datetime.now(IST_TZ)
+        ctx = build_scheduler_context(now, MarketCalendar.is_holiday, BlobUtils.is_running_locally())
+        if not is_market_open(now, MarketCalendar.is_holiday) and not ctx.use_test_cache:
+            logging.info("[LiveScheduler] Market is closed or holiday; skipping option-chain fetch")
+            return
+
         chain_cache = OptionChainCacheManager(cache_dir=ctx.test_cache_root if ctx.use_test_cache else None)
         if ctx.use_test_cache:
             logging.info("[LiveScheduler] TEST_MODE after-hours: writing cache to %s", ctx.test_cache_root)

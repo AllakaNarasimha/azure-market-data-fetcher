@@ -84,6 +84,15 @@ class QuoteCacheManager:
         row = {**quote, "symbol": symbol, "source": source, "fetched_at": fetched_at}
         df = pd.DataFrame([row])
 
+        if not BlobUtils.is_running_locally():
+            with self._blob_sync.open_parquet(str(self.cache_dir)) as lake:
+                lake.upsert(
+                    self._blob_name(symbol, fetched_at.date()),
+                    df,
+                    keys=["symbol", "source", "fetched_at"],
+                )
+            return
+
         partition = self._partition_path(symbol, fetched_at.date())
         partition.mkdir(parents=True, exist_ok=True)
         file_path = partition / "part-0.parquet"
@@ -113,6 +122,11 @@ class QuoteCacheManager:
         return count
 
     def load(self, symbol: str, day: date_cls) -> pd.DataFrame:
+        if not BlobUtils.is_running_locally():
+            with self._blob_sync.open_parquet(str(self.cache_dir)) as lake:
+                df = lake.read(self._blob_name(symbol, day), missing_ok=True)
+            return df if df is not None else pd.DataFrame()
+
         file_path = self._partition_path(symbol, day) / "part-0.parquet"
         self._blob_sync.download_if_missing(str(file_path), self._blob_name(symbol, day))
         if not file_path.exists():
@@ -177,6 +191,22 @@ class OptionChainCacheManager:
         # Record the scheduler-assigned batch second on each row so downstream
         # consumers (reports) can see which batch/second produced the snapshot.
         df["batch_second"] = batch_second
+
+        if not BlobUtils.is_running_locally():
+            with self._blob_sync.open_parquet(str(self.cache_dir)) as lake:
+                lake.upsert(
+                    self._blob_name(underlying, fetched_at.date()),
+                    df,
+                    keys=["symbol", "source", "expiry_timestamp", "fetched_at"],
+                )
+                expiry_data = data.get("expiryData", [])
+                if expiry_data:
+                    lake.write(
+                        self._expiry_blob_name(underlying),
+                        pd.DataFrame(expiry_data),
+                        mode="overwrite",
+                    )
+            return len(df)
 
         partition = self._partition_path(underlying, fetched_at.date())
         partition.mkdir(parents=True, exist_ok=True)
@@ -245,6 +275,21 @@ class OptionChainCacheManager:
         if frames:
             df = pd.concat(frames, ignore_index=True)
 
+            if not BlobUtils.is_running_locally():
+                with self._blob_sync.open_parquet(str(self.cache_dir)) as lake:
+                    lake.upsert(
+                        self._blob_name(underlying, fetched_at.date()),
+                        df,
+                        keys=["symbol", "source", "expiry_timestamp", "fetched_at"],
+                    )
+                    if expiry_data:
+                        lake.write(
+                            self._expiry_blob_name(underlying),
+                            pd.DataFrame(expiry_data),
+                            mode="overwrite",
+                        )
+                return len(df)
+
             partition = self._partition_path(underlying, fetched_at.date())
             partition.mkdir(parents=True, exist_ok=True)
             file_path = partition / "part-0.parquet"
@@ -262,6 +307,11 @@ class OptionChainCacheManager:
             self._blob_sync.upload(str(file_path), blob_name)
             saved_rows = len(df)
 
+        if expiry_data and not BlobUtils.is_running_locally():
+            with self._blob_sync.open_parquet(str(self.cache_dir)) as lake:
+                lake.write(self._expiry_blob_name(underlying), pd.DataFrame(expiry_data), mode="overwrite")
+            return saved_rows
+
         if expiry_data:
             expiry_path = self._expiry_path(underlying)
             expiry_path.parent.mkdir(parents=True, exist_ok=True)
@@ -274,6 +324,11 @@ class OptionChainCacheManager:
         return saved_rows
 
     def load(self, underlying: str, day: date_cls) -> pd.DataFrame:
+        if not BlobUtils.is_running_locally():
+            with self._blob_sync.open_parquet(str(self.cache_dir)) as lake:
+                df = lake.read(self._blob_name(underlying, day), missing_ok=True)
+            return df if df is not None else pd.DataFrame()
+
         file_path = self._partition_path(underlying, day) / "part-0.parquet"
         self._blob_sync.download_if_missing(str(file_path), self._blob_name(underlying, day))
         if not file_path.exists():
@@ -281,6 +336,11 @@ class OptionChainCacheManager:
         return pd.read_parquet(file_path, engine=self.ENGINE)
 
     def load_expiries(self, underlying: str) -> pd.DataFrame:
+        if not BlobUtils.is_running_locally():
+            with self._blob_sync.open_parquet(str(self.cache_dir)) as lake:
+                df = lake.read(self._expiry_blob_name(underlying), missing_ok=True)
+            return df if df is not None else pd.DataFrame()
+
         file_path = self._expiry_path(underlying)
         self._blob_sync.download_if_missing(str(file_path), self._expiry_blob_name(underlying))
         if not file_path.exists():

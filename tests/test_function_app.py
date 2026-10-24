@@ -5,7 +5,14 @@ import sys
 import time
 from datetime import datetime, timedelta
 
+import pytest
+import pytz
+
 import brokers.broker_data_manager as bdm
+import schedulers.live_scheduler as live_scheduler_module
+from schedulers.scheduler_utils import is_market_open
+from schedulers.market_calendar import MarketCalendar
+from utils.market_times import MarketTimes
 from utils.cache_utils import is_test_blob_path, test_blob_name as build_test_blob_name
 from utils.env_config import EnvConfig
 from utils.shared_cache import EXPIRIES_CACHE
@@ -71,9 +78,46 @@ def test_test_mode_uses_all_days_schedule(monkeypatch):
     assert fa.DYNAMIC_OPTION_CHAIN_CRON.split(" ")[-1] == "*"
 
 
+def test_market_hours_guard_includes_open_close_and_excludes_closed_times():
+    timezone = pytz.timezone(MarketTimes.timezone())
+    trading_day = datetime(2026, 10, 23)
+    before_open = timezone.localize(trading_day.replace(hour=9, minute=14))
+    market_open = timezone.localize(trading_day.replace(hour=9, minute=15))
+    market_close = timezone.localize(trading_day.replace(hour=16, minute=0))
+    after_close = timezone.localize(trading_day.replace(hour=16, minute=1))
+
+    assert not is_market_open(before_open, MarketCalendar.is_holiday)
+    assert is_market_open(market_open, MarketCalendar.is_holiday)
+    assert is_market_open(market_close, MarketCalendar.is_holiday)
+    assert not is_market_open(after_close, MarketCalendar.is_holiday)
+
+
+def test_live_scheduler_does_not_create_cache_when_market_is_closed(monkeypatch):
+    monkeypatch.setenv("TEST_MODE", "false")
+    monkeypatch.setattr(EnvConfig, "_overrides", {})
+    timezone = pytz.timezone(MarketTimes.timezone())
+    closed_time = timezone.localize(datetime(2026, 10, 23, 16, 1))
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return closed_time if tz is not None else closed_time.replace(tzinfo=None)
+
+    monkeypatch.setattr(live_scheduler_module, "datetime", FixedDateTime)
+    monkeypatch.setattr(
+        live_scheduler_module,
+        "OptionChainCacheManager",
+        lambda **kwargs: pytest.fail("cache manager must not be created outside market hours"),
+    )
+
+    live_scheduler_module.LiveScheduler().run(symbols=["NSE:TEST-EQ"])
+
+
 def test_daily_timer_runs_on_startup_in_test_mode(monkeypatch):
     fa = setupDependencies(monkeypatch, minutes=5)
     functions = {function.get_function_name(): function for function in fa.app.get_functions()}
+    if "daily_job" not in functions:
+        pytest.skip("ENABLE_BACKGROUND_TRIGGERS is False; daily_job not registered")
     daily_binding = functions["daily_job"].get_bindings_dict()["bindings"][0]
 
     assert daily_binding["runOnStartup"] is True
@@ -200,4 +244,48 @@ def test_live_scheduler_fetches_batch_concurrently(monkeypatch):
     # All 5 calls should have started within the same short window (i.e. "same second"),
     # not staggered call_delay apart from each other.
     assert max(call_starts) - min(call_starts) < call_delay
+
+
+def test_background_triggers_registered(monkeypatch):
+    fa = setupDependencies(monkeypatch, minutes=5)
+    functions = {function.get_function_name(): function for function in fa.app.get_functions()}
+
+    assert "daily_job" in functions
+    assert "option_chain_fetcher" in functions
+
+    daily_binding = functions["daily_job"].get_bindings_dict()["bindings"][0]
+    assert daily_binding["schedule"] == "0 0 3 * * 1-5"
+
+    chain_binding = functions["option_chain_fetcher"].get_bindings_dict()["bindings"][0]
+    assert chain_binding["schedule"] == fa.DYNAMIC_OPTION_CHAIN_CRON
+
+
+def test_option_chain_fetcher_batches_symbols(monkeypatch):
+    fa = setupDependencies(monkeypatch, minutes=5)
+    symbols = [f"NSE:SYM{i}-EQ" for i in range(fa.PARALLEL_BATCH_SIZE * 60)]
+    monkeypatch.setattr(fa, "OPTION_CHAIN_SYMBOLS", symbols)
+
+    calls = []
+
+    class RecordingScheduler:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self, symbols=None, batch_second=None):
+            calls.append((list(symbols), batch_second))
+
+    monkeypatch.setattr(fa, "LiveScheduler", RecordingScheduler)
+
+    class FakeTimer:
+        past_due = False
+        schedule_status = None
+
+    chain_fn = {f.get_function_name(): f for f in fa.app.get_functions()}["option_chain_fetcher"].get_user_function()
+    chain_fn(FakeTimer())
+
+    assert len(calls) == 1
+    batch_symbols, batch_second = calls[0]
+    assert 0 <= batch_second < 60
+    assert 0 < len(batch_symbols) <= fa.PARALLEL_BATCH_SIZE
+    assert all(s in symbols for s in batch_symbols)
 

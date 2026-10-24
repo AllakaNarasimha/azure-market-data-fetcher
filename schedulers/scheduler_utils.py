@@ -4,6 +4,7 @@ from typing import Optional, Callable
 
 from utils.cache_utils import should_use_test_cache
 from utils.env_config import EnvConfig
+from utils.market_times import MarketTimes
 
 
 @dataclass
@@ -29,6 +30,17 @@ def build_scheduler_context(now: datetime, is_holiday: Callable[[datetime], bool
     )
 
     return SchedulerContext(now=now, test_mode_active=test_mode_active, use_test_cache=use_test_cache, test_cache_root=test_cache_root)
+
+
+def is_market_open(now: datetime, is_holiday: Callable[[datetime], bool]) -> bool:
+    """Return whether the supplied local-market time is within trading hours."""
+    market_open = now.replace(
+        hour=MarketTimes.open().hour, minute=MarketTimes.open().minute, second=0, microsecond=0
+    )
+    market_close = now.replace(
+        hour=MarketTimes.close().hour, minute=MarketTimes.close().minute, second=0, microsecond=0
+    )
+    return market_open <= now <= market_close and not is_holiday(now)
 
 
 def calculate_dynamic_option_chain_cron(

@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 import pandas as pd
 
-from utils.blob_utils import BlobUtils
+from utils.blob_utils import BlobSync, BlobUtils
 from utils.df_utils import DFUtils
 from storage.market_data_storage_client import MarketDataStorageClient
 
@@ -19,9 +19,8 @@ class AzureBlobMarketIndexer:
     def __init__(self, container_name: str | None = None):
         # Default to the centralized market data container if not provided
         self.container_name = container_name or BlobUtils.market_data_cache_blob()
-        # Container client may be None if MARKET_STORAGE_CONNECTION is not configured
-        self.container_client = BlobUtils.get_container_client(self.container_name)
         # Storage client used to fetch blob content when a blob path is supplied
+        self._blob_sync = BlobSync()
         self._storage_client = MarketDataStorageClient()
 
     def _ensure_local_parquet(self, source: str | object) -> tuple[str, bool]:
@@ -112,10 +111,10 @@ class AzureBlobMarketIndexer:
             df_index.to_csv(temp_local_path, index=False)
 
             # Upload to Azure if available
-            if (not BlobUtils.is_running_locally()) and self.container_client:
-                blob_client = self.container_client.get_blob_client(blob_path)
+            if (not BlobUtils.is_running_locally()) and self._blob_sync.get_container(self.container_name):
                 with open(temp_local_path, "rb") as data:
-                    blob_client.upload_blob(data, overwrite=True)
+                    if not self._blob_sync.upload_content(self.container_name, blob_path, data.read()):
+                        raise RuntimeError(f"Upload of index '{blob_path}' to container '{self.container_name}' failed")
                 logger.info("Index successfully uploaded to Azure Blob: %s", blob_path)
                 return blob_path
 
