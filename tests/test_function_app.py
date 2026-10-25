@@ -260,6 +260,65 @@ def test_container_create_is_retried_after_unexpected_failure(monkeypatch):
     assert len(attempts) == 2
 
 
+def _fyers_auth_with_counters(monkeypatch, login_error=None):
+    import brokers.broker_authenticate as ba
+
+    attempts = []
+
+    def fake_login(self):
+        attempts.append(1)
+        time.sleep(0.05)
+        if login_error:
+            raise login_error
+        return "auth-code"
+
+    monkeypatch.setattr(ba.FyersTOTPAuthenticator, "_gate", ba._LoginGate("Fyers"))
+    monkeypatch.setattr(ba.FyersTOTPAuthenticator, "_login_with_totp", fake_login)
+    monkeypatch.setattr(ba.FyersTOTPAuthenticator, "_exchange_code", lambda self, code: "tok")
+    monkeypatch.setattr(ba.TokenCache, "__init__", lambda self: None)
+    monkeypatch.setattr(ba.TokenCache, "load", lambda self, broker: None)
+    monkeypatch.setattr(ba.TokenCache, "save", lambda self, broker, data: None)
+    config = type("Cfg", (), {"app_id": "APP"})()
+    return ba, attempts, config
+
+
+def test_failed_fyers_login_is_not_retried_for_every_caller(monkeypatch):
+    ba, attempts, config = _fyers_auth_with_counters(monkeypatch, login_error=RuntimeError("429 rate limited"))
+
+    messages = []
+    for _ in range(6):
+        with pytest.raises(RuntimeError) as exc:
+            ba.FyersTOTPAuthenticator(config=config).get_access_token()
+        messages.append(str(exc.value))
+
+    assert len(attempts) == 1
+    assert "429 rate limited" in messages[0]
+    assert all("login skipped" in m and "429 rate limited" in m for m in messages[1:])
+
+
+def test_concurrent_fyers_callers_share_one_login(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    ba, attempts, config = _fyers_auth_with_counters(monkeypatch)
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        tokens = list(pool.map(lambda _: ba.FyersTOTPAuthenticator(config=config).get_access_token(), range(5)))
+
+    assert len(attempts) == 1
+    assert tokens == ["APP:tok"] * 5
+
+
+def test_fyers_login_is_retried_after_cooldown(monkeypatch):
+    ba, attempts, config = _fyers_auth_with_counters(monkeypatch, login_error=RuntimeError("boom"))
+    monkeypatch.setattr(ba.FyersTOTPAuthenticator._gate, "COOLDOWN_SECONDS", 0)
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError):
+            ba.FyersTOTPAuthenticator(config=config).get_access_token()
+
+    assert len(attempts) == 2
+
+
 def test_live_scheduler_does_not_cache_empty_expiries_and_logs(monkeypatch, caplog):
     fa = setupDependencies(monkeypatch, minutes=5)
 

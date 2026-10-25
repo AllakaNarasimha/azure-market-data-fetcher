@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -144,6 +145,51 @@ def _safe_json(resp: requests.Response, step: str) -> dict:
         ) from exc
 
 
+class _LoginGate:
+    """Process-wide guard around a broker login.
+
+    Each symbol/range/thread builds its own manager, and a manager only keeps its client
+    after a successful login. Without this, an expired token plus a failing login retries
+    the login for every call, in parallel, which gets the host rate-limited (HTTP 429).
+    The gate serialises logins, reuses a recently validated token, and backs off after a failure.
+    """
+
+    TOKEN_TTL_SECONDS = 300
+    COOLDOWN_SECONDS = 600
+
+    def __init__(self, name: str):
+        self.name = name
+        self.lock = threading.RLock()
+        self._token: Optional[str] = None
+        self._validated_at = 0.0
+        self._failed_at: Optional[float] = None
+        self._last_error = ""
+
+    def fresh_token(self) -> Optional[str]:
+        if self._token and time.monotonic() - self._validated_at < self.TOKEN_TTL_SECONDS:
+            return self._token
+        return None
+
+    def remember(self, token: str) -> None:
+        self._token = token
+        self._validated_at = time.monotonic()
+        self._failed_at = None
+
+    def raise_if_cooling_down(self) -> None:
+        if self._failed_at is None:
+            return
+        remaining = self.COOLDOWN_SECONDS - (time.monotonic() - self._failed_at)
+        if remaining > 0:
+            raise RuntimeError(
+                f"{self.name} login skipped for another {int(remaining)}s after a recent failure: {self._last_error}"
+            )
+
+    def record_failure(self, exc: Exception) -> None:
+        self._failed_at = time.monotonic()
+        self._last_error = str(exc)[:200]
+        self._token = None
+
+
 class BrokerConfig:
     ENV_VAR: str = ""
     FIELDS: dict = {}
@@ -196,6 +242,8 @@ class FyersConfig(BrokerConfig):
     }
 
 class DhanTOTPAuthenticator:
+    _gate = _LoginGate("Dhan")
+
     def __init__(self, config: Optional[DhanConfig] = None):
         self.config = config or DhanConfig()
 
@@ -211,12 +259,32 @@ class DhanTOTPAuthenticator:
             return False
 
     def get_access_token(self, force: bool = False) -> str:
-        cache = TokenCache()
-        if not force:
-            cached = cache.load("dhan")
-            if cached and cached.get("accessToken") and self._is_valid(cached["accessToken"]):
-                return cached["accessToken"]
+        gate = self._gate
+        with gate.lock:
+            if not force:
+                token = gate.fresh_token()
+                if not token:
+                    cached = TokenCache().load("dhan")
+                    candidate = cached.get("accessToken") if cached else None
+                    if candidate and self._is_valid(candidate):
+                        gate.remember(candidate)
+                        token = candidate
+                if token:
+                    return token
 
+            gate.raise_if_cooling_down()
+            try:
+                token, expiry_time, totp = self._login()
+            except Exception as exc:
+                gate.record_failure(exc)
+                raise
+            gate.remember(token)
+
+        ConfigStore().update_value(DhanConfig.ENV_VAR, "totp", totp)
+        TokenCache().save("dhan", {"accessToken": token, "expiryTime": expiry_time})
+        return token
+
+    def _login(self) -> tuple[str, Optional[str], str]:
         if not (self.config.client_id and self.config.pin and self.config.totp_secret):
             raise RuntimeError("DHAN_CLIENT_ID, DHAN_PIN and DHAN_TOTP_SECRET must be configured")
 
@@ -230,9 +298,7 @@ class DhanTOTPAuthenticator:
             raise RuntimeError(f"Dhan token generation failed: {response}")
 
         logger.info("Dhan access token generated. Expiry: %s", response.get("expiryTime", "N/A"))
-        ConfigStore().update_value(DhanConfig.ENV_VAR, "totp", totp)
-        cache.save("dhan", {"accessToken": response["accessToken"], "expiryTime": response.get("expiryTime")})
-        return response["accessToken"]
+        return response["accessToken"], response.get("expiryTime"), totp
 
     def get_client(self):
         access_token = self.get_access_token()
@@ -241,6 +307,8 @@ class DhanTOTPAuthenticator:
 
 
 class FyersTOTPAuthenticator:
+    _gate = _LoginGate("Fyers")
+
     def __init__(self, config: Optional[FyersConfig] = None):
         self.config = config or FyersConfig()
 
@@ -363,16 +431,29 @@ class FyersTOTPAuthenticator:
             return False
 
     def get_access_token(self, force: bool = False) -> str:
-        cache = TokenCache()
-        if not force:
-            cached = cache.load("fyers")
-            raw_token = cached.get("accessToken") if cached else None
-            if raw_token and self._is_valid(raw_token):
-                return f"{self.config.app_id}:{raw_token}"
+        gate = self._gate
+        with gate.lock:
+            if not force:
+                raw_token = gate.fresh_token()
+                if not raw_token:
+                    cached = TokenCache().load("fyers")
+                    candidate = cached.get("accessToken") if cached else None
+                    if candidate and self._is_valid(candidate):
+                        gate.remember(candidate)
+                        raw_token = candidate
+                if raw_token:
+                    return f"{self.config.app_id}:{raw_token}"
 
-        auth_code = self._login_with_totp()
-        raw_token = self._exchange_code(auth_code)
-        cache.save("fyers", {"accessToken": raw_token})
+            gate.raise_if_cooling_down()
+            try:
+                auth_code = self._login_with_totp()
+                raw_token = self._exchange_code(auth_code)
+            except Exception as exc:
+                gate.record_failure(exc)
+                raise
+            gate.remember(raw_token)
+
+        TokenCache().save("fyers", {"accessToken": raw_token})
         return f"{self.config.app_id}:{raw_token}"
 
 
