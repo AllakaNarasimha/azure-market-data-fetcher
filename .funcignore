@@ -65,9 +65,9 @@ brokers/trading_servicebus_manager.py
 /.python_packages/lib/site-packages/pluggy/
 /.python_packages/lib/site-packages/iniconfig/
 /.python_packages/lib/site-packages/wheel/
-# pyarrow Flight/Substrait (~27 MB). Only Parquet is used; pyarrow.parquet/dataset do not load them.
+# pyarrow Flight (~20 MB). Only Parquet is used; pyarrow does not load Flight at import.
+# NOTE: do NOT exclude *substrait*: libarrow_substrait is linked by pyarrow.lib on Linux.
 /.python_packages/lib/site-packages/pyarrow/*flight*
-/.python_packages/lib/site-packages/pyarrow/*substrait*
 # pyarrow C++ headers (build-time only)
 /.python_packages/lib/site-packages/pyarrow/include/
 # Cython sources and type stubs are not needed to import compiled modules
