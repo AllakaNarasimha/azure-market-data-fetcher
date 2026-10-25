@@ -17,8 +17,8 @@ from utils.cache_utils import is_test_blob_path, test_blob_name as build_test_bl
 from utils.env_config import EnvConfig
 from utils.shared_cache import EXPIRIES_CACHE
 
-def setupDependencies(monkeypatch, minutes: int = 1):
-    """Arrange and return the loaded `function_app` module with TEST_MODE enabled.
+def setupDependencies(monkeypatch, minutes: int = 1, test_mode: bool = True, symbols: str | None = None):
+    """Arrange and return the loaded `function_app` module (TEST_MODE enabled by default).
 
     This mirrors the agent guideline's `setupDependencies()` pattern used for
     repeatable test setup. It sets environment vars and imports/reloads the
@@ -28,8 +28,11 @@ def setupDependencies(monkeypatch, minutes: int = 1):
     if repo_path not in sys.path:
         sys.path.insert(0, repo_path)
 
-    monkeypatch.setenv("TEST_MODE", "true")
+    monkeypatch.setenv("TEST_MODE", "true" if test_mode else "false")
     monkeypatch.setenv("TEST_MODE_MINUTES", str(minutes))
+    if symbols is not None:
+        # EnvConfig overrides (loaded from local.settings.json) win over os.environ.
+        monkeypatch.setitem(EnvConfig._overrides, "OPTION_CHAIN_SYMBOLS", symbols)
 
     for mod_name in ("function_app", "app_settings"):
         if mod_name in sys.modules:
@@ -318,7 +321,7 @@ def test_live_scheduler_fetches_batch_concurrently(monkeypatch):
 
 
 def test_background_triggers_registered(monkeypatch):
-    fa = setupDependencies(monkeypatch, minutes=5)
+    fa = setupDependencies(monkeypatch, minutes=5, test_mode=False, symbols="NSE:A-EQ,NSE:B-EQ")
     functions = {function.get_function_name(): function for function in fa.app.get_functions()}
 
     assert "daily_job" in functions
@@ -326,13 +329,49 @@ def test_background_triggers_registered(monkeypatch):
 
     daily_binding = functions["daily_job"].get_bindings_dict()["bindings"][0]
     assert daily_binding["schedule"] == "0 0 3 * * 1-5"
+    assert daily_binding["runOnStartup"] is False
 
     chain_binding = functions["option_chain_fetcher"].get_bindings_dict()["bindings"][0]
     assert chain_binding["schedule"] == fa.DYNAMIC_OPTION_CHAIN_CRON
+    assert chain_binding["runOnStartup"] is False
+
+
+def test_test_mode_runs_jobs_once_on_startup_only(monkeypatch):
+    fa = setupDependencies(monkeypatch, minutes=5, symbols="NSE:A-EQ,NSE:B-EQ")
+    functions = {function.get_function_name(): function for function in fa.app.get_functions()}
+
+    for name in ("daily_job", "option_chain_fetcher"):
+        binding = functions[name].get_bindings_dict()["bindings"][0]
+        assert binding["runOnStartup"] is True
+        assert binding["schedule"] == fa.TEST_MODE_ONCE_CRON
+
+
+def test_test_mode_option_chain_fetcher_runs_every_batch_once(monkeypatch):
+    symbols = [f"NSE:SYM{i}-EQ" for i in range(12)]
+    fa = setupDependencies(monkeypatch, minutes=5, symbols=",".join(symbols))
+    monkeypatch.setattr(fa, "PARALLEL_BATCH_SIZE", 5)
+
+    calls = []
+
+    class RecordingScheduler:
+        def run(self, symbols=None, batch_second=None):
+            calls.append((list(symbols), batch_second))
+
+    monkeypatch.setattr(fa, "LiveScheduler", RecordingScheduler)
+
+    class FakeTimer:
+        past_due = False
+        schedule_status = None
+
+    chain_fn = {f.get_function_name(): f for f in fa.app.get_functions()}["option_chain_fetcher"].get_user_function()
+    chain_fn(FakeTimer())
+
+    assert [batch_second for _, batch_second in calls] == [0, 1, 2]
+    assert [s for batch, _ in calls for s in batch] == symbols
 
 
 def test_option_chain_fetcher_batches_symbols(monkeypatch):
-    fa = setupDependencies(monkeypatch, minutes=5)
+    fa = setupDependencies(monkeypatch, minutes=5, test_mode=False, symbols="NSE:A-EQ")
     symbols = [f"NSE:SYM{i}-EQ" for i in range(fa.PARALLEL_BATCH_SIZE * 60)]
     monkeypatch.setattr(fa, "OPTION_CHAIN_SYMBOLS", symbols)
 

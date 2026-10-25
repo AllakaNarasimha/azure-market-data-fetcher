@@ -1,5 +1,6 @@
 import logging
 import fnmatch
+import math
 from datetime import datetime
 from pathlib import Path
 import azure.functions as func
@@ -34,9 +35,18 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
 
 ENABLE_BACKGROUND_TRIGGERS = True
 
+# In TEST_MODE the jobs run once per app start (run_on_startup) and not on a recurring schedule.
+# This cron only fires on Jan 1st, so it never triggers during a test session.
+TEST_MODE_ONCE_CRON = "0 0 0 1 1 *"
+
 if ENABLE_BACKGROUND_TRIGGERS:
     # Daily job runs at 8:30 AM IST on weekdays
-    @app.schedule(schedule="0 0 3 * * 1-5", arg_name="dailyTimer", run_on_startup=TEST_MODE, use_monitor=False)
+    @app.schedule(
+        schedule=TEST_MODE_ONCE_CRON if TEST_MODE else "0 0 3 * * 1-5",
+        arg_name="dailyTimer",
+        run_on_startup=TEST_MODE,
+        use_monitor=False,
+    )
     def daily_job(dailyTimer: func.TimerRequest) -> None:
         try:
             DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run()
@@ -46,21 +56,30 @@ if ENABLE_BACKGROUND_TRIGGERS:
 
 if ENABLE_BACKGROUND_TRIGGERS:
     if DYNAMIC_OPTION_CHAIN_CRON:
-        @app.schedule(schedule=DYNAMIC_OPTION_CHAIN_CRON, arg_name="chainTimer", run_on_startup=TEST_MODE, use_monitor=False)
+        @app.schedule(
+            schedule=TEST_MODE_ONCE_CRON if TEST_MODE else DYNAMIC_OPTION_CHAIN_CRON,
+            arg_name="chainTimer",
+            run_on_startup=TEST_MODE,
+            use_monitor=False,
+        )
         def option_chain_fetcher(chainTimer: func.TimerRequest) -> None:
-            now = datetime.now(IST_TZ)
-            current_second = now.second
-            target_seconds = [current_second]
+            if TEST_MODE:
+                # One-shot run: fetch every batch once instead of only the batch for the current second.
+                target_seconds = list(range(math.ceil(len(OPTION_CHAIN_SYMBOLS) / PARALLEL_BATCH_SIZE)))
+            else:
+                now = datetime.now(IST_TZ)
+                current_second = now.second
+                target_seconds = [current_second]
 
-            # Catch up on any seconds missed within the same minute (e.g. cold start delay).
-            if chainTimer.past_due and chainTimer.schedule_status and chainTimer.schedule_status.last:
-                try:
-                    last_run = datetime.fromisoformat(str(chainTimer.schedule_status.last))
-                    if last_run.minute == now.minute and last_run.second < current_second:
-                        target_seconds = list(range(last_run.second + 1, current_second + 1))
-                        logging.warning(f"[LiveScheduler] Timer past due; catching up seconds {target_seconds}")
-                except Exception:
-                    logging.exception("[LiveScheduler] Failed parsing schedule_status.last")
+                # Catch up on any seconds missed within the same minute (e.g. cold start delay).
+                if chainTimer.past_due and chainTimer.schedule_status and chainTimer.schedule_status.last:
+                    try:
+                        last_run = datetime.fromisoformat(str(chainTimer.schedule_status.last))
+                        if last_run.minute == now.minute and last_run.second < current_second:
+                            target_seconds = list(range(last_run.second + 1, current_second + 1))
+                            logging.warning(f"[LiveScheduler] Timer past due; catching up seconds {target_seconds}")
+                    except Exception:
+                        logging.exception("[LiveScheduler] Failed parsing schedule_status.last")
 
             for sec in target_seconds:
                 start_idx = sec * PARALLEL_BATCH_SIZE
