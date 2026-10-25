@@ -35,3 +35,4 @@ stages:
     sourceVersionMessage: '$(sourceVersionMessage)'
     allowNonMasterDeploy: true
     installAzureDataToolkit: true
+    publishAzureArtifacts: false
