@@ -56,6 +56,26 @@ utils/df_utils.py
 # Not imported anywhere in the codebase; unused/dead module.
 brokers/trading_servicebus_manager.py
 
+# Vendored-dependency pruning (deploy zip size). Anchored so they only touch the
+# pip --target folder, never application code. None of these are imported at runtime.
+# pytest and its dependencies (pytest stays in requirements.txt for the CI test step)
+/.python_packages/lib/site-packages/_pytest/
+/.python_packages/lib/site-packages/pytest/
+/.python_packages/lib/site-packages/pygments/
+/.python_packages/lib/site-packages/pluggy/
+/.python_packages/lib/site-packages/iniconfig/
+/.python_packages/lib/site-packages/wheel/
+# pyarrow Flight/Substrait (~27 MB). Only Parquet is used; pyarrow.parquet/dataset do not load them.
+/.python_packages/lib/site-packages/pyarrow/*flight*
+/.python_packages/lib/site-packages/pyarrow/*substrait*
+# pyarrow C++ headers (build-time only)
+/.python_packages/lib/site-packages/pyarrow/include/
+# Cython sources and type stubs are not needed to import compiled modules
+*.pyx
+*.pxd
+*.pxi
+*.pyi
+
 # Python cache and test artifacts
 __pycache__/
 *.pyc
