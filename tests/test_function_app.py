@@ -319,6 +319,109 @@ def test_fyers_login_is_retried_after_cooldown(monkeypatch):
     assert len(attempts) == 2
 
 
+def test_fyers_exchange_reports_missing_app_secret(monkeypatch):
+    import brokers.broker_authenticate as ba
+
+    called = []
+    monkeypatch.setattr(ba.requests, "post", lambda *a, **k: called.append(1))
+
+    cfg = type("Cfg", (), {"app_id": "ABCDE12345-100", "app_secret": None, "callback_url": "http://x"})()
+    with pytest.raises(RuntimeError, match="FYERS_APP"):
+        ba.FyersTOTPAuthenticator(config=cfg)._exchange_code("code")
+    assert called == []
+
+    cfg.app_secret = "@Microsoft.KeyVault(SecretUri=https://v.vault.azure.net/secrets/s)"
+    with pytest.raises(RuntimeError, match="Key Vault reference"):
+        ba.FyersTOTPAuthenticator(config=cfg)._exchange_code("code")
+
+
+def test_fyers_exchange_trims_secret_and_hints_on_hash_mismatch(monkeypatch):
+    import hashlib
+    import brokers.broker_authenticate as ba
+
+    class BoomSession:
+        def __init__(self, **kwargs):
+            raise RuntimeError("sdk down")
+
+    sent = {}
+
+    def fake_post(url, json=None, timeout=None):
+        sent.update(json)
+        return type("Resp", (), {"status_code": 400, "text": '{"code":-5,"message":"invalid app id hash","s":"error"}'})()
+
+    monkeypatch.setattr(ba.fyersModel, "SessionModel", BoomSession)
+    monkeypatch.setattr(ba.requests, "post", fake_post)
+
+    cfg = type("Cfg", (), {"app_id": "ABCDE12345-100", "app_secret": "SECRET0001\n", "callback_url": "http://x"})()
+    with pytest.raises(RuntimeError) as exc:
+        ba.FyersTOTPAuthenticator(config=cfg)._exchange_code("code")
+
+    assert sent["appIdHash"] == hashlib.sha256(b"ABCDE12345-100:SECRET0001").hexdigest()
+    assert "app id and app secret do not match" in str(exc.value)
+    assert "SECRET0001" not in str(exc.value)
+
+
+def test_upload_not_found_clears_container_memo_so_it_is_recreated(monkeypatch):
+    from unittest.mock import MagicMock
+    from azure.core.exceptions import ResourceNotFoundError
+    from utils import blob_utils
+
+    created = []
+
+    class FakeContainer:
+        def create_container(self):
+            created.append(1)
+
+    class FakeService:
+        def get_container_client(self, name):
+            return FakeContainer()
+
+    monkeypatch.setattr(blob_utils.BlobServiceClient, "from_connection_string", staticmethod(lambda conn: FakeService()))
+    monkeypatch.setattr(blob_utils.BlobUtils, "_ensured_containers", set())
+    monkeypatch.setattr(blob_utils.BlobUtils, "is_running_locally", staticmethod(lambda: False))
+
+    blob_utils.BlobUtils.get_container_client("broker-tokens", "conn")
+    blob_utils.BlobUtils.get_container_client("broker-tokens", "conn")
+    assert len(created) == 1
+
+    primary = MagicMock()
+    primary.get_blob_client.return_value.upload_blob.side_effect = ResourceNotFoundError("ContainerNotFound")
+    sync = blob_utils.BlobSync.__new__(blob_utils.BlobSync)
+    sync._connection_string = "conn"
+    sync._is_running_locally = False
+    sync._containers = {"broker-tokens": primary}
+
+    assert sync.upload_content("broker-tokens", "fyers.json", b"{}") is False
+
+    blob_utils.BlobUtils.get_container_client("broker-tokens", "conn")
+    assert len(created) == 2
+
+
+def test_token_cache_save_uses_fallback_upload_so_missing_container_is_recreated(monkeypatch):
+    from unittest.mock import MagicMock
+    import brokers.broker_authenticate as ba
+
+    sync = MagicMock()
+    monkeypatch.setattr(ba, "BlobSync", lambda *a, **k: sync)
+    monkeypatch.setattr(ba.BlobUtils, "is_running_locally", staticmethod(lambda: False))
+
+    ba.TokenCache().save("fyers", {"accessToken": "tok"})
+
+    sync.upload_content_with_fallback.assert_called_once_with(
+        ba.BlobUtils.BROKER_TOKEN_BLOB, "fyers.json", b'{"accessToken": "tok"}'
+    )
+
+
+def test_fyers_token_is_saved_when_no_token_blob_exists(monkeypatch):
+    ba, attempts, config = _fyers_auth_with_counters(monkeypatch)
+    saved = []
+    monkeypatch.setattr(ba.TokenCache, "save", lambda self, broker, data: saved.append((broker, data)))
+
+    assert ba.FyersTOTPAuthenticator(config=config).get_access_token() == "APP:tok"
+
+    assert saved == [("fyers", {"accessToken": "tok"})]
+
+
 def test_live_scheduler_does_not_cache_empty_expiries_and_logs(monkeypatch, caplog):
     fa = setupDependencies(monkeypatch, minutes=5)
 

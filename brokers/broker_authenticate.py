@@ -107,8 +107,9 @@ class TokenCache:
                 self.LOCAL_DIR.mkdir(parents=True, exist_ok=True)
                 (self.LOCAL_DIR / f"{broker}.json").write_text(json.dumps(token_data))
                 return
-            if not self._blob_sync.upload_content(BlobUtils.BROKER_TOKEN_BLOB, f"{broker}.json", json.dumps(token_data).encode()):
-                logger.warning("BlobSync unavailable; skipping %s token cache", broker)
+            self._blob_sync.upload_content_with_fallback(
+                BlobUtils.BROKER_TOKEN_BLOB, f"{broker}.json", json.dumps(token_data).encode()
+            )
         except Exception:
             logger.exception("Failed to cache %s token", broker)
 
@@ -390,13 +391,19 @@ class FyersTOTPAuthenticator:
 
     def _exchange_code(self, auth_code: str) -> str:
         cfg = self.config
+        app_id = (cfg.app_id or "").strip()
+        app_secret = (cfg.app_secret or "").strip()
+        if not app_id or not app_secret:
+            raise RuntimeError("Fyers app credentials not configured; set FYERS_CONFIG.app_id and FYERS_APP (app secret)")
+        if app_secret.startswith("@Microsoft.KeyVault"):
+            raise RuntimeError("FYERS_APP is an unresolved Key Vault reference; check the app's identity access to the vault")
         try:
             session = fyersModel.SessionModel(
-                client_id=cfg.app_id,
+                client_id=app_id,
                 redirect_uri=cfg.callback_url,
                 response_type="code",
                 state="state",
-                secret_key=cfg.app_secret,
+                secret_key=app_secret,
                 grant_type="authorization_code",
             )
             session.set_token(auth_code)
@@ -408,7 +415,7 @@ class FyersTOTPAuthenticator:
         except Exception:
             logger.exception("Fyers SDK token exchange failed")
 
-        app_id_hash = hashlib.sha256(f"{cfg.app_id}:{cfg.app_secret}".encode()).hexdigest()
+        app_id_hash = hashlib.sha256(f"{app_id}:{app_secret}".encode()).hexdigest()
         payload = {"grant_type": "authorization_code", "appIdHash": app_id_hash, "code": auth_code}
         resp = requests.post("https://api-t1.fyers.in/api/v3/validate-authcode", json=payload, timeout=10)
         if resp.status_code == 200:
@@ -417,7 +424,13 @@ class FyersTOTPAuthenticator:
             if access_token:
                 return access_token
             raise RuntimeError(f"Fyers token exchange response: {data.get('message', 'no message')}")
-        raise RuntimeError(f"Fyers token exchange failed: {resp.status_code} {resp.text}")
+        hint = ""
+        if "app id hash" in resp.text:
+            hint = (
+                f" (hint: app id and app secret do not match; app_id ends with '{app_id[-4:]}', "
+                f"app secret length {len(app_secret)} - check FYERS_APP and FYERS_CONFIG.app_id)"
+            )
+        raise RuntimeError(f"Fyers token exchange failed: {resp.status_code} {resp.text}{hint}")
 
     def _is_valid(self, raw_token: str) -> bool:
         try:

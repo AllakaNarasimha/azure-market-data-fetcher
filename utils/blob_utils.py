@@ -87,6 +87,15 @@ class BlobUtils:
         return container_client
 
     @staticmethod
+    def forget_container(container_name: str, connection_string: Optional[str] = None) -> None:
+        """Drop the "already created" memo so the next get_container_client recreates a deleted container."""
+        conn_str = connection_string or EnvConfig.market_storage_connection()
+        if not conn_str:
+            return
+        with BlobUtils._ensured_lock:
+            BlobUtils._ensured_containers.discard((conn_str, container_name))
+
+    @staticmethod
     def get_blob_connection_string() -> Optional[str]:
         """Return the connection string used for blob operations.
 
@@ -334,6 +343,11 @@ class BlobSync:
             blob.upload_blob(data, overwrite=overwrite)
             logger.info("[BLOB SYNC] Uploaded content to %s/%s", container_name, blob_name)
             return True
+        except ResourceNotFoundError:
+            # Container was deleted after this process confirmed it; forget that so the next client recreates it.
+            BlobUtils.forget_container(container_name, self._connection_string)
+            logger.exception("[BLOB SYNC] Failed to upload content to %s/%s", container_name, blob_name)
+            return False
         except Exception:
             logger.exception("[BLOB SYNC] Failed to upload content to %s/%s", container_name, blob_name)
             return False
