@@ -6,6 +6,7 @@ from pathlib import Path
 import azure.functions as func
 
 from utils.blob_utils import BlobUtils
+from utils.env_config import EnvConfig
 from storage.market_data_storage_client import MarketDataStorageClient
 from schedulers.live_scheduler import LiveScheduler
 from schedulers.daily_scheduler import DailyScheduler
@@ -35,21 +36,30 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
 
 ENABLE_BACKGROUND_TRIGGERS = True
 
-# In TEST_MODE the jobs run once per app start (run_on_startup) and not on a recurring schedule.
+# In TEST_MODE the option-chain job runs once per app start (run_on_startup) and not on a recurring schedule.
 # This cron only fires on Jan 1st, so it never triggers during a test session.
 TEST_MODE_ONCE_CRON = "0 0 0 1 1 *"
 
+# The daily job covers many symbols and days of history and may not finish in one invocation, so it polls every
+# 10 minutes inside market hours (04:00-10:59 UTC; DailyScheduler itself only runs 09:15-16:00 IST on trading days).
+# Each run continues where the last stopped and exits immediately once the day's work is complete, so
+# the data is still fetched once per day. In TEST_MODE it polls around the clock after the startup run.
+DAILY_JOB_CRON = "0 */10 * * * *" if TEST_MODE else "0 */10 4-10 * * 1-5"
+DAILY_JOB_TIME_BUDGET_SECONDS = float(EnvConfig.env("DAILY_JOB_TIME_BUDGET_SECONDS", "480") or "480")
+
 if ENABLE_BACKGROUND_TRIGGERS:
-    # Daily job runs at 8:30 AM IST on weekdays
     @app.schedule(
-        schedule=TEST_MODE_ONCE_CRON if TEST_MODE else "0 0 3 * * 1-5",
+        schedule=DAILY_JOB_CRON,
         arg_name="dailyTimer",
         run_on_startup=TEST_MODE,
         use_monitor=False,
     )
     def daily_job(dailyTimer: func.TimerRequest) -> None:
         try:
-            DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run()
+            complete = DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run(
+                time_budget_seconds=DAILY_JOB_TIME_BUDGET_SECONDS
+            )
+            logging.info(f"[daily_job] finished; all symbols done for today: {complete}")
         except Exception as ex:
             logging.exception(f"[daily_job] DailyScheduler.run() failed: {ex!r}")
 

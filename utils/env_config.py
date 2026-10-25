@@ -128,6 +128,10 @@ class EnvConfig:
         return False
 
     @classmethod
+    def get_test_mode_start(cls) -> Optional[datetime]:
+        return cls._TEST_MODE_START
+
+    @classmethod
     def get_test_mode_expiry(cls) -> Optional[datetime]:
         return cls._TEST_MODE_EXPIRY
     

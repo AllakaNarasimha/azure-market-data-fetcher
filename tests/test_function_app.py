@@ -546,6 +546,181 @@ def test_live_scheduler_one_failing_symbol_does_not_stop_others(monkeypatch):
     assert sorted(fetched) == ["NSE:A-EQ", "NSE:C-EQ"]
 
 
+def test_registry_log_off_many_writes_once_and_keeps_every_entry(tmp_path, monkeypatch):
+    import pandas as pd
+    from storage.parquet_cache_manager import CacheRegistry, CacheConstants
+
+    stored = {}
+    upserts = []
+
+    class FakeLake:
+        def upsert(self, path, df, keys):
+            upserts.append(len(df))
+            stored["df"] = df
+
+    class FakeCtx:
+        def __enter__(self):
+            return FakeLake()
+
+        def __exit__(self, *exc):
+            return False
+
+    registry = CacheRegistry(str(tmp_path))
+    monkeypatch.setattr(CacheRegistry, "load", lambda self: pd.DataFrame(columns=CacheConstants.REGISTRY_COLUMNS))
+    monkeypatch.setattr(registry._blob_sync, "open_parquet", lambda *a, **k: FakeCtx())
+    monkeypatch.setattr("storage.parquet_cache_manager.BlobUtils.is_running_locally", staticmethod(lambda: False))
+
+    entries = [
+        ("NSE:SBIN-EQ", "1", datetime(2026, 10, day, 15, 30), datetime(2026, 10, day, 16, 0), CacheConstants.DATA_GAP)
+        for day in range(1, 31)
+    ]
+    registry.log_off_many(entries)
+    registry.log_off_many([])
+
+    assert upserts == [30]
+    assert set(stored["df"]["reason"]) == {CacheConstants.DATA_GAP}
+
+
+def test_save_candles_logs_all_gaps_in_one_registry_update(tmp_path, monkeypatch):
+    from storage.parquet_cache_manager import CacheRegistry, ParquetCacheManager
+
+    batches = []
+    monkeypatch.setattr(CacheRegistry, "log_off_many", lambda self, entries: batches.append(list(entries)))
+    monkeypatch.setattr(CacheRegistry, "log_off", lambda self, *a, **k: pytest.fail("per-gap registry write"))
+    monkeypatch.setattr(CacheRegistry, "load", lambda self: __import__("pandas").DataFrame(
+        columns=["symbol", "interval", "start_time", "end_time", "reason"]
+    ))
+
+    manager = ParquetCacheManager(cache_dir=str(tmp_path))
+    start = datetime(2026, 10, 19, 9, 15)
+    end = datetime(2026, 10, 23, 16, 0)
+    ts = int(datetime(2026, 10, 19, 9, 15).timestamp())
+    candle = {"timestamp": ts, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10}
+
+    manager.save_candles("NSE:SBIN-EQ", [candle], interval="1", fetch_start=start, fetch_end=end)
+
+    assert len(batches) == 1
+    assert len(batches[0]) >= 1
+
+
+def _daily_scheduler_for_resume(monkeypatch, tmp_path, symbols, chain_symbols="", *, outcome=None):
+    """DailyScheduler wired to fakes; returns (module, scheduler, calls). Work happens in tmp_path."""
+    monkeypatch.chdir(tmp_path)
+    fa = setupDependencies(monkeypatch, minutes=5, symbols=chain_symbols or symbols)
+    monkeypatch.setitem(EnvConfig._overrides, "WATCHLIST_SYMBOLS", symbols)
+    monkeypatch.setitem(EnvConfig._overrides, "OPTION_CHAIN_SYMBOLS", chain_symbols)
+    monkeypatch.setattr(bdm.InstrumentResolver, "resolve", staticmethod(lambda s: type("Instr", (), {"symbol": s})()))
+    monkeypatch.setattr(bdm.PreferredBrokers, "managers", staticmethod(lambda: {"fyers": object()}))
+    scheduler = fa.DailyScheduler(history_days=1)
+    calls = []
+
+    def fetch(manager, broker, instrument, cache, start, end):
+        calls.append(instrument.symbol)
+        return (outcome or {}).get(instrument.symbol, True)
+
+    monkeypatch.setattr(scheduler, "_fetch_history_if_missing", fetch)
+    monkeypatch.setattr(fa.DailyScheduler, "_fetch_option_chain", staticmethod(lambda *a, **k: None))
+    return fa, scheduler, calls
+
+
+def test_daily_job_resumes_where_the_budget_ran_out(monkeypatch, tmp_path):
+    fa, scheduler, calls = _daily_scheduler_for_resume(monkeypatch, tmp_path, "NSE:A-EQ,NSE:B-EQ,NSE:C-EQ")
+    # Budget runs out after one symbol's work has been done.
+    out_of_time = iter([False, False, True, True, True, True])
+    monkeypatch.setattr(scheduler, "_out_of_time", lambda: next(out_of_time, True))
+
+    assert scheduler.run(time_budget_seconds=60) is False
+    first_run = list(dict.fromkeys(calls))
+    assert first_run and len(first_run) < 3
+
+    calls.clear()
+    monkeypatch.setattr(scheduler, "_out_of_time", lambda: False)
+    assert scheduler.run(time_budget_seconds=60) is True
+    assert set(first_run).isdisjoint(set(calls))
+    assert set(first_run) | set(calls) == {"NSE:A-EQ", "NSE:B-EQ", "NSE:C-EQ"}
+
+    calls.clear()
+    assert scheduler.run(time_budget_seconds=60) is True
+    assert calls == []
+
+
+def test_daily_job_completed_day_is_not_rerun_but_a_new_start_is(monkeypatch, tmp_path):
+    fa, scheduler, calls = _daily_scheduler_for_resume(monkeypatch, tmp_path, "NSE:A-EQ,NSE:B-EQ")
+    assert scheduler.run(time_budget_seconds=60) is True
+    assert sorted(set(calls)) == ["NSE:A-EQ", "NSE:B-EQ"]
+
+    calls.clear()
+    scheduler.run(time_budget_seconds=60)
+    assert calls == []
+
+    # TEST_MODE restart: a new start time means a new progress record, so the job runs again.
+    monkeypatch.setattr(EnvConfig, "_TEST_MODE_START", EnvConfig._TEST_MODE_START + timedelta(seconds=7))
+    scheduler.run(time_budget_seconds=60)
+    assert sorted(set(calls)) == ["NSE:A-EQ", "NSE:B-EQ"]
+
+
+def test_daily_job_failing_symbol_is_retried_a_limited_number_of_times(monkeypatch, tmp_path):
+    fa, scheduler, calls = _daily_scheduler_for_resume(
+        monkeypatch, tmp_path, "NSE:A-EQ,NSE:B-EQ", outcome={"NSE:A-EQ": False}
+    )
+
+    for _ in range(5):
+        scheduler.run(time_budget_seconds=60)
+
+    assert calls.count("NSE:A-EQ") == 3
+    assert calls.count("NSE:B-EQ") == 1
+
+
+def test_daily_job_without_budget_does_not_write_progress(monkeypatch, tmp_path):
+    fa, scheduler, calls = _daily_scheduler_for_resume(monkeypatch, tmp_path, "NSE:A-EQ")
+
+    assert scheduler.run() is True
+
+    assert not list(tmp_path.rglob("daily_progress"))
+
+
+def test_daily_progress_round_trips_through_blob_storage(monkeypatch):
+    from azure.core.exceptions import ResourceNotFoundError
+    from schedulers import daily_progress as dp
+
+    store = {}
+
+    class FakeBlob:
+        def __init__(self, name):
+            self.name = name
+
+        def download_blob(self):
+            if self.name not in store:
+                raise ResourceNotFoundError("missing")
+            return type("D", (), {"readall": lambda s: store[self.name]})()
+
+        def upload_blob(self, data, overwrite=False):
+            store[self.name] = data
+
+    class FakeContainer:
+        def get_blob_client(self, name):
+            return FakeBlob(name)
+
+    class FakeSync:
+        def get_container(self, name):
+            assert name == "cache-container"
+            return FakeContainer()
+
+    monkeypatch.setattr(dp.BlobUtils, "is_running_locally", staticmethod(lambda: False))
+    monkeypatch.setattr(dp, "BlobSync", FakeSync)
+
+    progress = dp.DailyProgress("2026-10-26", container="cache-container")
+    assert progress.pending(["history:A", "history:B"]) == ["history:A", "history:B"]
+    progress.record("history:A", True)
+    progress.record("history:B", False)
+
+    reloaded = dp.DailyProgress("2026-10-26", container="cache-container")
+    assert reloaded.is_finished("history:A")
+    assert not reloaded.is_finished("history:B")
+    assert reloaded.tasks["history:B"] == 1
+    assert "daily_progress/2026-10-26.json" in store
+
+
 def test_live_scheduler_does_not_cache_empty_expiries_and_logs(monkeypatch, caplog):
     fa = setupDependencies(monkeypatch, minutes=5)
 
@@ -614,7 +789,7 @@ def test_background_triggers_registered(monkeypatch):
     assert "option_chain_fetcher" in functions
 
     daily_binding = functions["daily_job"].get_bindings_dict()["bindings"][0]
-    assert daily_binding["schedule"] == "0 0 3 * * 1-5"
+    assert daily_binding["schedule"] == "0 */10 4-10 * * 1-5"
     assert daily_binding["runOnStartup"] is False
 
     chain_binding = functions["option_chain_fetcher"].get_bindings_dict()["bindings"][0]
@@ -622,14 +797,17 @@ def test_background_triggers_registered(monkeypatch):
     assert chain_binding["runOnStartup"] is False
 
 
-def test_test_mode_runs_jobs_once_on_startup_only(monkeypatch):
+def test_test_mode_runs_jobs_on_startup_and_daily_job_resumes(monkeypatch):
     fa = setupDependencies(monkeypatch, minutes=5, symbols="NSE:A-EQ,NSE:B-EQ")
     functions = {function.get_function_name(): function for function in fa.app.get_functions()}
 
-    for name in ("daily_job", "option_chain_fetcher"):
-        binding = functions[name].get_bindings_dict()["bindings"][0]
-        assert binding["runOnStartup"] is True
-        assert binding["schedule"] == fa.TEST_MODE_ONCE_CRON
+    chain = functions["option_chain_fetcher"].get_bindings_dict()["bindings"][0]
+    assert chain["runOnStartup"] is True
+    assert chain["schedule"] == fa.TEST_MODE_ONCE_CRON
+
+    daily = functions["daily_job"].get_bindings_dict()["bindings"][0]
+    assert daily["runOnStartup"] is True
+    assert daily["schedule"] == "0 */10 * * * *"
 
 
 def test_test_mode_option_chain_fetcher_runs_every_batch_once(monkeypatch):

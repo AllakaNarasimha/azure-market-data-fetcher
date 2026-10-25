@@ -169,19 +169,32 @@ class CacheRegistry:
         reason: str,
     ):
         """Persist a known market-off or data-problem interval."""
+        self.log_off_many([(symbol, interval, start_dt, end_dt, reason)])
+
+    def log_off_many(self, entries: List[Tuple[str, str, datetime, datetime, str]]):
+        """Persist several off/problem intervals with a single registry read-modify-write.
+
+        Each registry update is a blob read, lock and write in Azure, so logging many gaps one by one
+        (e.g. one per trading day) can dominate a job's run time.
+        """
+        if not entries:
+            return
         try:
             df = self.load()
-            new_row = pd.DataFrame(
-                [{
-                    "symbol": str(symbol),
-                    "interval": str(interval),
-                    "start_time": pd.to_datetime(start_dt),
-                    "end_time": pd.to_datetime(end_dt),
-                    "reason": str(reason),
-                }]
+            new_rows = pd.DataFrame(
+                [
+                    {
+                        "symbol": str(symbol),
+                        "interval": str(interval),
+                        "start_time": pd.to_datetime(start_dt),
+                        "end_time": pd.to_datetime(end_dt),
+                        "reason": str(reason),
+                    }
+                    for symbol, interval, start_dt, end_dt, reason in entries
+                ]
             )
 
-            df = pd.concat([df, new_row], ignore_index=True)
+            df = pd.concat([df, new_rows], ignore_index=True)
             df = df.drop_duplicates(
                 subset=CacheConstants.REGISTRY_COLUMNS,
                 keep="last",
@@ -190,17 +203,16 @@ class CacheRegistry:
             if not BlobUtils.is_running_locally():
                 with self._blob_sync.open_parquet(self.registry_path) as lake:
                     lake.upsert(self.BLOB_NAME, df, keys=CacheConstants.REGISTRY_COLUMNS)
+            else:
+                df.to_parquet(
+                    self.registry_path,
+                    engine=CacheConstants.ENGINE,
+                    index=False,
+                )
+                self._blob_sync.upload(self.registry_path, self.BLOB_NAME)
+
+            for symbol, interval, start_dt, end_dt, reason in entries:
                 logger.info("[REGISTRY] %s | %s | %s → %s | %s", symbol, interval, start_dt, end_dt, reason)
-                return
-
-            df.to_parquet(
-                self.registry_path,
-                engine=CacheConstants.ENGINE,
-                index=False,
-            )
-            self._blob_sync.upload(self.registry_path, self.BLOB_NAME)
-
-            logger.info("[REGISTRY] %s | %s | %s → %s | %s", symbol, interval, start_dt, end_dt, reason)
         except Exception as exc:
             logger.warning("[REGISTRY] Failed to save log: %s", exc)
 
@@ -444,10 +456,12 @@ class ParquetCacheManager:
                 missing_ranges = self.gap_detector.get_missing_ranges(
                     data, fetch_start, fetch_end, interval, self.registry, symbol
                 )
-                for gap_start, gap_end in missing_ranges:
-                    self.registry.log_off(
-                        symbol, interval, gap_start, gap_end, CacheConstants.DATA_GAP
-                    )
+                self.registry.log_off_many(
+                    [
+                        (symbol, interval, gap_start, gap_end, CacheConstants.DATA_GAP)
+                        for gap_start, gap_end in missing_ranges
+                    ]
+                )
 
             dt_series = TimestampUtils.series_to_local(df["timestamp"])
             df = df[dt_series.notna()].copy()
