@@ -393,8 +393,13 @@ class FyersTOTPAuthenticator:
         cfg = self.config
         app_id = (cfg.app_id or "").strip()
         app_secret = (cfg.app_secret or "").strip()
-        if not app_id or not app_secret:
-            raise RuntimeError("Fyers app credentials not configured; set FYERS_CONFIG.app_id and FYERS_APP (app secret)")
+        missing = [
+            name
+            for name, value in (("FYERS_CONFIG.app_id", app_id), ("FYERS_APP (app secret)", app_secret))
+            if not value
+        ]
+        if missing:
+            raise RuntimeError(f"Fyers app credentials not configured; missing: {', '.join(missing)}")
         if app_secret.startswith("@Microsoft.KeyVault"):
             raise RuntimeError("FYERS_APP is an unresolved Key Vault reference; check the app's identity access to the vault")
         try:
