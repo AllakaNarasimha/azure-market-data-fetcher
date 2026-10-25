@@ -206,6 +206,77 @@ def test_daily_prefetch_logs_warning_when_no_expiries(monkeypatch, caplog):
     assert len(warnings) >= 1
 
 
+def test_container_create_is_requested_once_per_process(monkeypatch):
+    from azure.core.exceptions import ResourceExistsError
+    from utils import blob_utils
+
+    created = []
+
+    class FakeContainer:
+        def __init__(self, name):
+            self.name = name
+
+        def create_container(self):
+            created.append(self.name)
+            raise ResourceExistsError("exists")
+
+    class FakeService:
+        def get_container_client(self, name):
+            return FakeContainer(name)
+
+    monkeypatch.setattr(blob_utils.BlobServiceClient, "from_connection_string", staticmethod(lambda conn: FakeService()))
+    monkeypatch.setattr(blob_utils.BlobUtils, "_ensured_containers", set())
+
+    for _ in range(3):
+        blob_utils.BlobUtils.get_container_client("cache-a", "conn")
+    blob_utils.BlobUtils.get_container_client("cache-b", "conn")
+
+    assert created == ["cache-a", "cache-b"]
+
+
+def test_container_create_is_retried_after_unexpected_failure(monkeypatch):
+    from utils import blob_utils
+
+    attempts = []
+
+    class FakeContainer:
+        def create_container(self):
+            attempts.append(1)
+            raise RuntimeError("transient")
+
+    class FakeService:
+        def get_container_client(self, name):
+            return FakeContainer()
+
+    monkeypatch.setattr(blob_utils.BlobServiceClient, "from_connection_string", staticmethod(lambda conn: FakeService()))
+    monkeypatch.setattr(blob_utils.BlobUtils, "_ensured_containers", set())
+
+    blob_utils.BlobUtils.get_container_client("cache-a", "conn")
+    blob_utils.BlobUtils.get_container_client("cache-a", "conn")
+
+    assert len(attempts) == 2
+
+
+def test_live_scheduler_does_not_cache_empty_expiries_and_logs(monkeypatch, caplog):
+    fa = setupDependencies(monkeypatch, minutes=5)
+
+    class EmptyExpiryManager:
+        def get_expiries(self, instrument):
+            return []
+
+        def get_option_chain(self, *args, **kwargs):
+            pytest.fail("no option chain should be requested without expiries")
+
+    instrument = type("Instr", (), {"symbol": "NSE:EMPTY-EQ"})()
+    EXPIRIES_CACHE.clear()
+    with caplog.at_level(logging.WARNING):
+        fa.LiveScheduler()._fetch_option_chain_range(EmptyExpiryManager(), "fyers", instrument, chain_cache=None)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    assert ("fyers", "NSE:EMPTY-EQ", today) not in EXPIRIES_CACHE
+    assert any("returned no expiries" in r.message for r in caplog.records)
+
+
 def test_live_scheduler_fetches_batch_concurrently(monkeypatch):
     """A PARALLEL_BATCH_SIZE (5) symbol batch should be fetched concurrently,
     not one-by-one, so the broker sees ~5 overlapping calls within the same

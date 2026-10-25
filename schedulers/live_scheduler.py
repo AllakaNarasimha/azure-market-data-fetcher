@@ -100,10 +100,14 @@ class LiveScheduler:
         if expiries is None:
             try:
                 expiries = self._expiries_for(manager, broker_name, instrument) or []
-                EXPIRIES_CACHE[cache_key] = expiries
             except Exception as ex:
                 logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to fetch expiries: {ex!r}")
                 return
+            if not expiries:
+                # Don't cache an empty result, otherwise a transient/empty broker reply pins the symbol for the whole day.
+                logging.warning(f"[LiveScheduler] {instrument.symbol} ({broker_name}) returned no expiries; nothing to fetch")
+                return
+            EXPIRIES_CACHE[cache_key] = expiries
 
         expiry_list = []
         try:
@@ -112,6 +116,10 @@ class LiveScheduler:
             # Malformed/unexpected expiry entries (missing keys, wrong shape, etc.)
             # must not abort the whole batch's asyncio.gather - log and skip this symbol.
             logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to resolve expiry range: {ex!r}")
+            return
+
+        if not expiry_list:
+            logging.warning(f"[LiveScheduler] {instrument.symbol} ({broker_name}) no expiries in range; nothing to fetch")
             return
 
         responses: list[tuple] = []

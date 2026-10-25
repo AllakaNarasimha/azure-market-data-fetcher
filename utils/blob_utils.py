@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import io
 import os
+import threading
 from contextlib import contextmanager
 from importlib import import_module
 from pathlib import Path
@@ -56,6 +57,10 @@ class BlobUtils:
         return EnvConfig.environment()
 
 
+    # Containers already created/confirmed in this process, so repeated clients don't re-send create requests.
+    _ensured_containers: set[tuple[str, str]] = set()
+    _ensured_lock = threading.Lock()
+
     @staticmethod
     def get_container_client(container_name: str, connection_string: Optional[str] = None) -> Optional[ContainerClient]:
         conn_str = connection_string or EnvConfig.market_storage_connection()
@@ -64,12 +69,21 @@ class BlobUtils:
 
         blob_service = BlobServiceClient.from_connection_string(conn_str)
         container_client = blob_service.get_container_client(container_name)
+        key = (conn_str, container_name)
+        with BlobUtils._ensured_lock:
+            if key in BlobUtils._ensured_containers:
+                return container_client
         try:
             container_client.create_container()
+            created = True
         except ResourceExistsError:
-            pass
+            created = True
         except Exception:
             logger.exception("Failed to create blob container '%s'", container_name)
+            created = False
+        if created:
+            with BlobUtils._ensured_lock:
+                BlobUtils._ensured_containers.add(key)
         return container_client
 
     @staticmethod
