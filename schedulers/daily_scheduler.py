@@ -50,46 +50,61 @@ class DailyScheduler:
         ranges = MarketCalendar.get_trading_days_back(end_date, days_back=self.history_days)
 
         for symbol in symbols:
+            # A failure for one symbol must never stop the remaining symbols.
             try:
-                instrument = bdm.InstrumentResolver.resolve(symbol)
+                self._sync_history_for_symbol(symbol, ranges, candle_cache)
             except Exception as ex:
-                logging.exception(f"[DailyScheduler] Failed to resolve instrument for {symbol}: {ex!r}")
-                continue
-            for broker_name, manager in bdm.PreferredBrokers.managers().items():
-                any_fetched = False
-                for seg_start, seg_end in ranges:
-                    fetched = self._fetch_history_if_missing(
-                        manager, broker_name, instrument, candle_cache, seg_start.to_pydatetime(), seg_end.to_pydatetime()
-                    )
-                    any_fetched = any_fetched or bool(fetched)
-                if not any_fetched:
-                    logging.warning(
-                        f"[DailyScheduler] {instrument.symbol} ({broker_name}) history fetch returned no data or failed for all ranges"
-                    )
+                logging.exception(f"[DailyScheduler] History sync failed for {symbol}; continuing with next symbol: {ex!r}")
 
         for symbol in option_chain_symbols:
             try:
-                instrument = bdm.InstrumentResolver.resolve(symbol)
+                self._sync_option_chain_for_symbol(symbol, chain_cache)
             except Exception as ex:
-                logging.exception(f"[DailyScheduler] Failed to resolve instrument for {symbol}: {ex!r}")
-                continue
-
-            for broker_name, manager in bdm.PreferredBrokers.managers().items():
-                try:
-                    today = datetime.now(IST_TZ).strftime("%Y-%m-%d")
-                    cache_key = (broker_name, instrument.symbol, today)
-                    expiries = LiveScheduler._expiries_for(manager, broker_name, instrument) or []
-                    EXPIRIES_CACHE[cache_key] = expiries
-                    if not expiries:
-                        logging.warning(
-                            f"[DailyScheduler] {instrument.symbol} ({broker_name}) expiries not resolved during pre-market prefetch; running here and LiveScheduler will fetch on demand"
-                        )
-                except Exception as ex:
-                    logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) failed to prefetch expiries: {ex!r}")
-
-                self._fetch_option_chain(manager, broker_name, instrument, chain_cache)
+                logging.exception(f"[DailyScheduler] Option chain sync failed for {symbol}; continuing with next symbol: {ex!r}")
 
         logging.info("=== Daily Job Completed ===")
+
+    def _sync_history_for_symbol(self, symbol, ranges, candle_cache) -> None:
+        try:
+            instrument = bdm.InstrumentResolver.resolve(symbol)
+        except Exception as ex:
+            logging.exception(f"[DailyScheduler] Failed to resolve instrument for {symbol}: {ex!r}")
+            return
+        for broker_name, manager in bdm.PreferredBrokers.managers().items():
+            any_fetched = False
+            for seg_start, seg_end in ranges:
+                fetched = self._fetch_history_if_missing(
+                    manager, broker_name, instrument, candle_cache, seg_start.to_pydatetime(), seg_end.to_pydatetime()
+                )
+                any_fetched = any_fetched or bool(fetched)
+            if not any_fetched:
+                logging.warning(
+                    f"[DailyScheduler] {instrument.symbol} ({broker_name}) history fetch returned no data or failed for all ranges"
+                )
+
+    def _sync_option_chain_for_symbol(self, symbol, chain_cache) -> None:
+        IST_TZ = pytz.timezone(MarketTimes.timezone())
+        try:
+            instrument = bdm.InstrumentResolver.resolve(symbol)
+        except Exception as ex:
+            logging.exception(f"[DailyScheduler] Failed to resolve instrument for {symbol}: {ex!r}")
+            return
+
+        for broker_name, manager in bdm.PreferredBrokers.managers().items():
+            try:
+                today = datetime.now(IST_TZ).strftime("%Y-%m-%d")
+                cache_key = (broker_name, instrument.symbol, today)
+                expiries = LiveScheduler._expiries_for(manager, broker_name, instrument) or []
+                if expiries:
+                    EXPIRIES_CACHE[cache_key] = expiries
+                else:
+                    logging.warning(
+                        f"[DailyScheduler] {instrument.symbol} ({broker_name}) expiries not resolved during pre-market prefetch; running here and LiveScheduler will fetch on demand"
+                    )
+            except Exception as ex:
+                logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) failed to prefetch expiries: {ex!r}")
+
+            self._fetch_option_chain(manager, broker_name, instrument, chain_cache)
 
     def _fetch_history_if_missing(self, manager, broker_name, instrument, candle_cache, start_date, end_date) -> bool:
         try:

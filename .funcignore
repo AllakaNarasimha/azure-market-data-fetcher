@@ -58,6 +58,10 @@ brokers/trading_servicebus_manager.py
 
 # Vendored-dependency pruning (deploy zip size). Anchored so they only touch the
 # pip --target folder, never application code. None of these are imported at runtime.
+# fyers_apiv3 pins the obsolete PyPI "asyncio==3.4.3" backport (Python 3.4 syntax). On every
+# worker restart it shadows the standard library and crashes with "SyntaxError: invalid syntax".
+/.python_packages/lib/site-packages/asyncio/
+/.python_packages/lib/site-packages/asyncio-*.dist-info/
 # pytest and its dependencies (pytest stays in requirements.txt for the CI test step)
 /.python_packages/lib/site-packages/_pytest/
 /.python_packages/lib/site-packages/pytest/

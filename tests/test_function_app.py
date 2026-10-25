@@ -422,6 +422,130 @@ def test_fyers_token_is_saved_when_no_token_blob_exists(monkeypatch):
     assert saved == [("fyers", {"accessToken": "tok"})]
 
 
+def test_gap_detection_reads_registry_once_not_per_slot(tmp_path, monkeypatch):
+    import pandas as pd
+    from storage.parquet_cache_manager import CacheRegistry, MarketSession, CacheGapDetector
+
+    reads = []
+    monkeypatch.setattr(CacheRegistry, "load", lambda self: reads.append(1) or pd.DataFrame(
+        columns=["symbol", "interval", "start_time", "end_time", "reason"]
+    ))
+    registry = CacheRegistry(str(tmp_path))
+
+    start = datetime(2026, 10, 19, 9, 0)
+    end = datetime(2026, 10, 23, 16, 0)
+    ranges = CacheGapDetector(MarketSession()).get_missing_ranges([], start, end, "1", registry, "NSE:SBIN-EQ")
+
+    assert ranges, "expected missing slots for an empty cache"
+    assert len(reads) == 1
+
+
+def test_gap_detection_skips_slots_covered_by_registry(tmp_path, monkeypatch):
+    import pandas as pd
+    from storage.parquet_cache_manager import CacheRegistry, MarketSession, CacheGapDetector
+
+    off = pd.DataFrame([{
+        "symbol": "NSE:SBIN-EQ", "interval": "1", "reason": "MARKET_HOLIDAY",
+        "start_time": pd.Timestamp("2026-10-19 00:00"), "end_time": pd.Timestamp("2026-10-19 23:59"),
+    }])
+    monkeypatch.setattr(CacheRegistry, "load", lambda self: off)
+    registry = CacheRegistry(str(tmp_path))
+
+    ranges = CacheGapDetector(MarketSession()).get_missing_ranges(
+        [], datetime(2026, 10, 19, 9, 0), datetime(2026, 10, 19, 16, 0), "1", registry, "NSE:SBIN-EQ"
+    )
+
+    assert ranges == []
+
+
+def test_daily_scheduler_one_failing_symbol_does_not_stop_others(monkeypatch):
+    fa = setupDependencies(monkeypatch, minutes=5, symbols="NSE:A-EQ,NSE:B-EQ,NSE:C-EQ")
+    monkeypatch.setitem(EnvConfig._overrides, "WATCHLIST_SYMBOLS", "NSE:A-EQ,NSE:B-EQ,NSE:C-EQ")
+
+    class FakeManager:
+        def get_expiries(self, instrument):
+            return ["2026-09-30"]
+
+        def get_option_chain(self, *args, **kwargs):
+            return {"data": {}}
+
+    def resolve(symbol):
+        if symbol == "NSE:B-EQ":
+            raise RuntimeError("boom for B")
+        return type("Instr", (), {"symbol": symbol})()
+
+    seen = []
+    scheduler = fa.DailyScheduler()
+    monkeypatch.setattr(bdm.InstrumentResolver, "resolve", staticmethod(resolve))
+    monkeypatch.setattr(bdm.PreferredBrokers, "managers", staticmethod(lambda: {"fyers": FakeManager()}))
+    monkeypatch.setattr(
+        scheduler, "_fetch_history_if_missing", lambda manager, broker, instrument, *a, **k: seen.append(instrument.symbol) or True
+    )
+    monkeypatch.setattr(fa.DailyScheduler, "_fetch_option_chain", staticmethod(lambda *a, **k: None))
+
+    scheduler.run()
+
+    assert "NSE:A-EQ" in seen and "NSE:C-EQ" in seen
+    assert "NSE:B-EQ" not in seen
+
+
+def test_daily_scheduler_unexpected_symbol_error_does_not_stop_others(monkeypatch):
+    fa = setupDependencies(monkeypatch, minutes=5, symbols="NSE:A-EQ,NSE:B-EQ,NSE:C-EQ")
+    monkeypatch.setitem(EnvConfig._overrides, "WATCHLIST_SYMBOLS", "NSE:A-EQ,NSE:B-EQ,NSE:C-EQ")
+    monkeypatch.setattr(bdm.InstrumentResolver, "resolve", staticmethod(lambda s: type("Instr", (), {"symbol": s})()))
+
+    class FakeManager:
+        def get_expiries(self, instrument):
+            return ["2026-09-30"]
+
+    monkeypatch.setattr(bdm.PreferredBrokers, "managers", staticmethod(lambda: {"fyers": FakeManager()}))
+    scheduler = fa.DailyScheduler()
+
+    synced, chains = [], []
+
+    def history(symbol, ranges, candle_cache):
+        if symbol == "NSE:B-EQ":
+            raise ValueError("unexpected")
+        synced.append(symbol)
+
+    def chain(symbol, chain_cache):
+        if symbol == "NSE:A-EQ":
+            raise ValueError("unexpected")
+        chains.append(symbol)
+
+    monkeypatch.setattr(scheduler, "_sync_history_for_symbol", history)
+    monkeypatch.setattr(scheduler, "_sync_option_chain_for_symbol", chain)
+
+    scheduler.run()
+
+    assert synced == ["NSE:A-EQ", "NSE:C-EQ"]
+    assert chains == ["NSE:B-EQ", "NSE:C-EQ"]
+
+
+def test_live_scheduler_one_failing_symbol_does_not_stop_others(monkeypatch):
+    fa = setupDependencies(monkeypatch, minutes=5)
+    fetched = []
+
+    class FakeManager:
+        def get_expiries(self, instrument):
+            return ["2026-09-30"]
+
+        def get_option_chain(self, instrument, strikecount=10, expiries=None):
+            if instrument.symbol == "NSE:B-EQ":
+                raise RuntimeError("broker failed for B")
+            fetched.append(instrument.symbol)
+            return {"data": {}}
+
+    monkeypatch.setattr(bdm.InstrumentResolver, "resolve", staticmethod(lambda s: type("Instr", (), {"symbol": s})()))
+    monkeypatch.setattr(bdm.PreferredBrokers, "managers", staticmethod(lambda: {"fyers": FakeManager()}))
+    monkeypatch.setattr(bdm.ExpiryResolver, "resolve_range", staticmethod(lambda expiries, weeks, months: ["2026-09-30"]))
+    EXPIRIES_CACHE.clear()
+
+    fa.LiveScheduler(max_concurrency=1).run(symbols=["NSE:A-EQ", "NSE:B-EQ", "NSE:C-EQ"])
+
+    assert sorted(fetched) == ["NSE:A-EQ", "NSE:C-EQ"]
+
+
 def test_live_scheduler_does_not_cache_empty_expiries_and_logs(monkeypatch, caplog):
     fa = setupDependencies(monkeypatch, minutes=5)
 

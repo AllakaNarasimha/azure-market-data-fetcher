@@ -204,17 +204,11 @@ class CacheRegistry:
         except Exception as exc:
             logger.warning("[REGISTRY] Failed to save log: %s", exc)
 
-    def is_logged_as_off(
-        self,
-        symbol: str,
-        interval: str,
-        check_start: datetime,
-        check_end: datetime,
-    ) -> bool:
-        """Returns True only when covered by a permanent MARKET_CLOSED/WEEKEND/MARKET_HOLIDAY entry."""
+    def off_periods(self, symbol: str, interval: str) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+        """Known off/problem periods for one symbol+interval, read from the registry once."""
         df = self.load()
         if df.empty:
-            return False
+            return []
 
         valid_off_reasons = {
             CacheConstants.MARKET_CLOSED,
@@ -228,10 +222,26 @@ class CacheRegistry:
             (df["symbol"] == str(symbol))
             & (df["interval"] == str(interval))
             & (df["reason"].isin(valid_off_reasons))
-            & (df["start_time"] <= pd.to_datetime(check_start))
-            & (df["end_time"] >= pd.to_datetime(check_end))
         ]
-        return not matches.empty
+        return [
+            (pd.to_datetime(start), pd.to_datetime(end))
+            for start, end in zip(matches["start_time"], matches["end_time"])
+        ]
+
+    def is_logged_as_off(
+        self,
+        symbol: str,
+        interval: str,
+        check_start: datetime,
+        check_end: datetime,
+    ) -> bool:
+        """Returns True only when covered by a permanent MARKET_CLOSED/WEEKEND/MARKET_HOLIDAY entry."""
+        check_start = pd.to_datetime(check_start)
+        check_end = pd.to_datetime(check_end)
+        return any(
+            start <= check_start and end >= check_end
+            for start, end in self.off_periods(symbol, interval)
+        )
 
 
 # =====================================================================
@@ -342,6 +352,9 @@ class CacheGapDetector:
         if not expected_timestamps:
             return []
 
+        # Read the registry once per call; reading it per slot is one blob request per slot in Azure.
+        off_periods = registry.off_periods(symbol, interval)
+
         missing_timestamps = []
         for timestamp in expected_timestamps:
             slot_start = timestamp
@@ -349,8 +362,10 @@ class CacheGapDetector:
 
             if timestamp in cached_timestamps:
                 continue
-            if registry.is_logged_as_off(symbol, interval, slot_start, slot_end):
-                continue
+            if off_periods:
+                check_start, check_end = pd.to_datetime(slot_start), pd.to_datetime(slot_end)
+                if any(start <= check_start and end >= check_end for start, end in off_periods):
+                    continue
 
             missing_timestamps.append(timestamp)
 
