@@ -136,9 +136,15 @@ class LiveScheduler:
                 rows = chain_cache.save_fyers_responses_batch(
                     instrument.symbol, responses, source=broker_name, fetched_at=None, batch_second=batch_second
                 )
-                logging.info(
-                    f"[LiveScheduler] {instrument.symbol} ({broker_name}) option chain cached "
-                    f"({rows} rows across {len(responses)} expiries)"
-                )
+                if rows:
+                    logging.info(
+                        f"[LiveScheduler] {instrument.symbol} ({broker_name}) option chain cached "
+                        f"({rows} rows across {len(responses)} expiries)"
+                    )
+                else:
+                    logging.warning(
+                        f"[LiveScheduler] {instrument.symbol} ({broker_name}) option chain returned no rows "
+                        f"for {len(responses)} expiries; nothing cached"
+                    )
             except Exception as ex:
                 logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to save batched option chain: {ex!r}")

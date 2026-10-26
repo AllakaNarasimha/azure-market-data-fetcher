@@ -721,6 +721,119 @@ def test_daily_progress_round_trips_through_blob_storage(monkeypatch):
     assert "daily_progress/2026-10-26.json" in store
 
 
+def test_fyers_error_reply_is_raised_not_treated_as_empty_chain():
+    from brokers.broker_data_manager import FyersApiError, FyersDataManager
+
+    class Client:
+        def optionchain(self, params):
+            return {"s": "error", "code": -300, "message": "Invalid symbol"}
+
+    manager = FyersDataManager(auth=object())
+    manager._client = Client()
+    instrument = type("Instr", (), {"symbol": "NSE:HDFCBANK-EQ"})()
+
+    with pytest.raises(FyersApiError) as exc:
+        manager.get_option_chain(instrument, strikecount=10)
+    assert exc.value.code == -300 and "Invalid symbol" in str(exc.value) and "NSE:HDFCBANK-EQ" in str(exc.value)
+
+    with pytest.raises(FyersApiError):
+        manager.get_expiries(instrument)
+
+
+def test_fyers_rate_limit_is_retried_then_succeeds(monkeypatch):
+    import brokers.broker_data_manager as m
+
+    replies = [
+        {"s": "error", "code": 429, "message": "request limit reached"},
+        {"s": "error", "code": 429, "message": "request limit reached"},
+        {"s": "ok", "code": 200, "data": {"optionsChain": [{"symbol": "X"}], "expiryData": []}},
+    ]
+    sleeps = []
+    monkeypatch.setattr(m.time, "sleep", lambda s: sleeps.append(s))
+
+    class Client:
+        def optionchain(self, params):
+            return replies.pop(0)
+
+    manager = m.FyersDataManager(auth=object())
+    manager._client = Client()
+
+    chain = manager.get_option_chain(type("Instr", (), {"symbol": "NSE:SBIN-EQ"})(), strikecount=10)
+
+    assert chain["data"]["optionsChain"] == [{"symbol": "X"}]
+    assert sleeps == [1.0, 2.0]
+
+
+def test_fyers_rate_limit_gives_up_after_the_attempt_limit(monkeypatch):
+    import brokers.broker_data_manager as m
+
+    calls = []
+    monkeypatch.setattr(m.time, "sleep", lambda s: None)
+
+    class Client:
+        def optionchain(self, params):
+            calls.append(1)
+            return {"s": "error", "code": 429, "message": "request limit reached"}
+
+    manager = m.FyersDataManager(auth=object())
+    manager._client = Client()
+
+    with pytest.raises(m.FyersApiError, match="429"):
+        manager.get_expiries(type("Instr", (), {"symbol": "NSE:SBIN-EQ"})())
+    assert len(calls) == m.FyersDataManager.OPTION_CHAIN_ATTEMPTS
+
+
+def test_fyers_ok_reply_and_non_rate_limit_errors_are_not_retried(monkeypatch):
+    import brokers.broker_data_manager as m
+
+    monkeypatch.setattr(m.time, "sleep", lambda s: pytest.fail("must not sleep"))
+    calls = []
+
+    class OkClient:
+        def optionchain(self, params):
+            calls.append(1)
+            return {"s": "ok", "code": 200, "data": {"expiryData": [{"expiry": "1"}]}}
+
+    manager = m.FyersDataManager(auth=object())
+    manager._client = OkClient()
+    assert manager.get_expiries(type("Instr", (), {"symbol": "NSE:SBIN-EQ"})()) == [{"expiry": "1"}]
+    assert len(calls) == 1
+
+    class BadClient:
+        def optionchain(self, params):
+            calls.append(1)
+            return {"s": "error", "code": -99, "message": "bad request"}
+
+    manager._client = BadClient()
+    with pytest.raises(m.FyersApiError):
+        manager.get_expiries(type("Instr", (), {"symbol": "NSE:SBIN-EQ"})())
+    assert len(calls) == 2
+
+
+def test_daily_job_retries_a_symbol_whose_option_chain_came_back_empty(monkeypatch, tmp_path):
+    fa, scheduler, calls = _daily_scheduler_for_resume(monkeypatch, tmp_path, "", chain_symbols="NSE:A-EQ,NSE:B-EQ")
+    attempts = []
+
+    class FakeManager:
+        def get_expiries(self, instrument):
+            return ["2026-09-30"]
+
+    def fetch_chain(manager, broker, instrument, cache):
+        attempts.append(instrument.symbol)
+        # A empty on its first attempt only; B always has data.
+        return not (instrument.symbol == "NSE:A-EQ" and attempts.count("NSE:A-EQ") == 1)
+
+    monkeypatch.setattr(bdm.PreferredBrokers, "managers", staticmethod(lambda: {"fyers": FakeManager()}))
+    monkeypatch.setattr(fa.DailyScheduler, "_fetch_option_chain", staticmethod(fetch_chain))
+
+    scheduler.run(time_budget_seconds=60)
+    scheduler.run(time_budget_seconds=60)
+    scheduler.run(time_budget_seconds=60)
+
+    assert attempts.count("NSE:A-EQ") == 2
+    assert attempts.count("NSE:B-EQ") == 1
+
+
 def test_live_scheduler_does_not_cache_empty_expiries_and_logs(monkeypatch, caplog):
     fa = setupDependencies(monkeypatch, minutes=5)
 

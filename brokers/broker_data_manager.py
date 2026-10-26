@@ -18,6 +18,35 @@ from utils.env_config import EnvConfig
 logger = logging.getLogger(__name__)
 
 
+class FyersApiError(RuntimeError):
+    """Fyers answered an API call with an error payload instead of data."""
+
+    def __init__(self, what: str, code, message: str):
+        super().__init__(f"Fyers {what} failed: code={code} message={message!r}")
+        self.code = code
+        self.message = message
+
+
+def _fyers_error(response) -> Optional[tuple]:
+    """Return (code, message) when a Fyers reply is an error, else None.
+
+    Fyers reports failures as a normal reply such as {"s": "error", "code": 429, "message": "..."}
+    rather than raising, so callers that only read response["data"] silently see "no data".
+    """
+    if not isinstance(response, dict):
+        return None
+    status = response.get("s")
+    code = response.get("code")
+    if status == "error" or (status is None and code not in (None, 200)):
+        return code, str(response.get("message") or "")
+    return None
+
+
+def _is_rate_limited(code, message: str) -> bool:
+    text = message.lower()
+    return code == 429 or "limit" in text or "too many" in text
+
+
 class MasterFileCache:
     """Downloads reference/master files once per day and reuses them.
 
@@ -476,6 +505,9 @@ class DhanDataManager(IDataManager):
 
 
 class FyersDataManager(IDataManager):
+    OPTION_CHAIN_ATTEMPTS = 3
+    RETRY_BACKOFF_SECONDS = 1.0
+
     def __init__(self, auth: Optional[BrokerAuth] = None):
         self._auth = auth or BrokerAuth()
         self._client = None
@@ -484,6 +516,24 @@ class FyersDataManager(IDataManager):
         if self._client is None:
             self._client = self._auth.get_fyers_client()
         return self._client
+
+    def _optionchain(self, params: dict, what: str) -> dict:
+        """Call Fyers optionchain, retrying rate-limit replies and raising on any other error reply."""
+        for attempt in range(1, self.OPTION_CHAIN_ATTEMPTS + 1):
+            response = self._get_client().optionchain(params)
+            error = _fyers_error(response)
+            if error is None:
+                return response
+            code, message = error
+            if attempt < self.OPTION_CHAIN_ATTEMPTS and _is_rate_limited(code, message):
+                logger.warning(
+                    "Fyers %s rate limited for %s (code=%s, attempt %d/%d); retrying",
+                    what, params.get("symbol"), code, attempt, self.OPTION_CHAIN_ATTEMPTS,
+                )
+                time.sleep(self.RETRY_BACKOFF_SECONDS * attempt)
+                continue
+            raise FyersApiError(f"{what} for {params.get('symbol')}", code, message)
+        raise AssertionError("unreachable")
 
     def get_price(self, instrument: Instrument) -> dict:
         return self._get_client().quotes({"symbols": instrument.symbol})
@@ -519,13 +569,13 @@ class FyersDataManager(IDataManager):
         timestamp filter.
         """
         timestamp = expiries or ""
-        return self._get_client().optionchain(
-            {"symbol": instrument.symbol, "strikecount": strikecount, "timestamp": timestamp}
+        return self._optionchain(
+            {"symbol": instrument.symbol, "strikecount": strikecount, "timestamp": timestamp}, "option chain"
         )
 
     def get_expiries(self, instrument: Instrument) -> list[dict]:
         """Available expiries for the underlying: [{date, expiry (epoch str), expiry_flag}, ...], nearest first."""
-        chain = self._get_client().optionchain({"symbol": instrument.symbol, "strikecount": 1, "timestamp": ""})
+        chain = self._optionchain({"symbol": instrument.symbol, "strikecount": 1, "timestamp": ""}, "expiry list")
         return chain.get("data", {}).get("expiryData", [])
 
 

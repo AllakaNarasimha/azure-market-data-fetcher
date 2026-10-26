@@ -159,14 +159,15 @@ class DailyScheduler:
             succeeded = succeeded or any_ok
         return succeeded
 
-    def _sync_option_chain_for_symbol(self, symbol, chain_cache) -> None:
+    def _sync_option_chain_for_symbol(self, symbol, chain_cache) -> bool:
         IST_TZ = pytz.timezone(MarketTimes.timezone())
         try:
             instrument = bdm.InstrumentResolver.resolve(symbol)
         except Exception as ex:
             logging.exception(f"[DailyScheduler] Failed to resolve instrument for {symbol}: {ex!r}")
-            return
+            return False
 
+        saved = False
         for broker_name, manager in bdm.PreferredBrokers.managers().items():
             try:
                 today = datetime.now(IST_TZ).strftime("%Y-%m-%d")
@@ -181,7 +182,8 @@ class DailyScheduler:
             except Exception as ex:
                 logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) failed to prefetch expiries: {ex!r}")
 
-            self._fetch_option_chain(manager, broker_name, instrument, chain_cache)
+            saved = bool(self._fetch_option_chain(manager, broker_name, instrument, chain_cache)) or saved
+        return saved
 
     def _fetch_history_if_missing(self, manager, broker_name, instrument, candle_cache, start_date, end_date) -> bool:
         try:
@@ -213,8 +215,11 @@ class DailyScheduler:
             return False
 
     @staticmethod
-    def _fetch_option_chain(manager, broker_name, instrument, chain_cache) -> None:
-        """Single strikecount=10 snapshot - no expiry-range resolution, unlike LiveScheduler."""
+    def _fetch_option_chain(manager, broker_name, instrument, chain_cache) -> bool:
+        """Single strikecount=10 snapshot - no expiry-range resolution, unlike LiveScheduler.
+
+        Returns True only when rows were saved, so an empty or failed snapshot can be retried.
+        """
         IST_TZ = pytz.timezone(MarketTimes.timezone())
         try:
             chain = manager.get_option_chain(instrument, strikecount=10)
@@ -228,6 +233,11 @@ class DailyScheduler:
             rows = chain_cache.save_fyers_response(
                 instrument.symbol, chain, source=broker_name, batch_second=batch_second
             )
+            if not rows:
+                logging.warning(f"[DailyScheduler] {instrument.symbol} ({broker_name}) option chain had no rows to cache")
+                return False
             logging.info(f"[DailyScheduler] {instrument.symbol} ({broker_name}) option chain cached ({rows} rows)")
+            return True
         except Exception as ex:
             logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) option chain fetch failed: {ex!r}")
+            return False
