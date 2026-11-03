@@ -12,10 +12,39 @@ import pandas as pd
 import requests
 
 from brokers.broker_authenticate import BrokerAuth
-from utils.blob_utils import BlobUtils
+from utils.blob_utils import BlobSync, BlobUtils
 from utils.env_config import EnvConfig
 
 logger = logging.getLogger(__name__)
+
+
+class FyersApiError(RuntimeError):
+    """Fyers answered an API call with an error payload instead of data."""
+
+    def __init__(self, what: str, code, message: str):
+        super().__init__(f"Fyers {what} failed: code={code} message={message!r}")
+        self.code = code
+        self.message = message
+
+
+def _fyers_error(response) -> Optional[tuple]:
+    """Return (code, message) when a Fyers reply is an error, else None.
+
+    Fyers reports failures as a normal reply such as {"s": "error", "code": 429, "message": "..."}
+    rather than raising, so callers that only read response["data"] silently see "no data".
+    """
+    if not isinstance(response, dict):
+        return None
+    status = response.get("s")
+    code = response.get("code")
+    if status == "error" or (status is None and code not in (None, 200)):
+        return code, str(response.get("message") or "")
+    return None
+
+
+def _is_rate_limited(code, message: str) -> bool:
+    text = message.lower()
+    return code == 429 or "limit" in text or "too many" in text
 
 
 class MasterFileCache:
@@ -31,9 +60,7 @@ class MasterFileCache:
     def __init__(self, local_dir: Path):
         self.is_local = BlobUtils.is_running_locally()
         self.local_dir = local_dir
-        self._container_client = None
-        if not self.is_local:
-            self._container_client = BlobUtils.get_container_client(self.CONTAINER)
+        self._blob_sync = BlobSync()
 
     def get(self, filename: str, download_url: str) -> bytes:
         # Store master files under a date-specific subfolder so each day has
@@ -52,7 +79,7 @@ class MasterFileCache:
             path.write_bytes(resp.content)
             return path.read_bytes()
 
-        if not self._container_client:
+        if not self._blob_sync.get_container(self.CONTAINER):
             logger.warning("MARKET_STORAGE_CONNECTION not set; fetching %s without caching", filename)
             resp = requests.get(download_url, timeout=30)
             resp.raise_for_status()
@@ -61,15 +88,16 @@ class MasterFileCache:
         # For blob storage, use a dated blob path so each day's file is stored
         # under a DDMMYYYY prefix. This mirrors the local-folder behavior.
         blob_path = f"{today_folder}/{filename}"
-        blob = self._container_client.get_blob_client(blob_path)
         try:
-            if blob.exists():
-                return blob.download_blob().readall()
+            cached = self._blob_sync.read_if_exists(self.CONTAINER, blob_path)
+            if cached is not None:
+                return cached
 
             resp = requests.get(download_url, timeout=30)
             resp.raise_for_status()
             # Upload into the dated blob path
-            blob.upload_blob(resp.content, overwrite=True)
+            if not self._blob_sync.upload_content(self.CONTAINER, blob_path, resp.content):
+                raise RuntimeError(f"Failed to cache {self.CONTAINER}/{blob_path}")
             return resp.content
         except Exception:
             # As a last resort, fetch directly from the URL
@@ -477,6 +505,9 @@ class DhanDataManager(IDataManager):
 
 
 class FyersDataManager(IDataManager):
+    OPTION_CHAIN_ATTEMPTS = 3
+    RETRY_BACKOFF_SECONDS = 1.0
+
     def __init__(self, auth: Optional[BrokerAuth] = None):
         self._auth = auth or BrokerAuth()
         self._client = None
@@ -485,6 +516,24 @@ class FyersDataManager(IDataManager):
         if self._client is None:
             self._client = self._auth.get_fyers_client()
         return self._client
+
+    def _optionchain(self, params: dict, what: str) -> dict:
+        """Call Fyers optionchain, retrying rate-limit replies and raising on any other error reply."""
+        for attempt in range(1, self.OPTION_CHAIN_ATTEMPTS + 1):
+            response = self._get_client().optionchain(params)
+            error = _fyers_error(response)
+            if error is None:
+                return response
+            code, message = error
+            if attempt < self.OPTION_CHAIN_ATTEMPTS and _is_rate_limited(code, message):
+                logger.warning(
+                    "Fyers %s rate limited for %s (code=%s, attempt %d/%d); retrying",
+                    what, params.get("symbol"), code, attempt, self.OPTION_CHAIN_ATTEMPTS,
+                )
+                time.sleep(self.RETRY_BACKOFF_SECONDS * attempt)
+                continue
+            raise FyersApiError(f"{what} for {params.get('symbol')}", code, message)
+        raise AssertionError("unreachable")
 
     def get_price(self, instrument: Instrument) -> dict:
         return self._get_client().quotes({"symbols": instrument.symbol})
@@ -520,13 +569,13 @@ class FyersDataManager(IDataManager):
         timestamp filter.
         """
         timestamp = expiries or ""
-        return self._get_client().optionchain(
-            {"symbol": instrument.symbol, "strikecount": strikecount, "timestamp": timestamp}
+        return self._optionchain(
+            {"symbol": instrument.symbol, "strikecount": strikecount, "timestamp": timestamp}, "option chain"
         )
 
     def get_expiries(self, instrument: Instrument) -> list[dict]:
         """Available expiries for the underlying: [{date, expiry (epoch str), expiry_flag}, ...], nearest first."""
-        chain = self._get_client().optionchain({"symbol": instrument.symbol, "strikecount": 1, "timestamp": ""})
+        chain = self._optionchain({"symbol": instrument.symbol, "strikecount": 1, "timestamp": ""}, "expiry list")
         return chain.get("data", {}).get("expiryData", [])
 
 

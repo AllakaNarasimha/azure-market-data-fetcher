@@ -6,6 +6,7 @@ venv/
 
 # Local configuration and secrets
 local.settings.json
+requirements-local.txt
 .env/
 .azure-personal/
 
@@ -54,6 +55,30 @@ storage/azure_blob_market_indexer.py
 utils/df_utils.py
 # Not imported anywhere in the codebase; unused/dead module.
 brokers/trading_servicebus_manager.py
+
+# Vendored-dependency pruning (deploy zip size). Anchored so they only touch the
+# pip --target folder, never application code. None of these are imported at runtime.
+# fyers_apiv3 pins the obsolete PyPI "asyncio==3.4.3" backport (Python 3.4 syntax). On every
+# worker restart it shadows the standard library and crashes with "SyntaxError: invalid syntax".
+/.python_packages/lib/site-packages/asyncio/
+/.python_packages/lib/site-packages/asyncio-*.dist-info/
+# pytest and its dependencies (pytest stays in requirements.txt for the CI test step)
+/.python_packages/lib/site-packages/_pytest/
+/.python_packages/lib/site-packages/pytest/
+/.python_packages/lib/site-packages/pygments/
+/.python_packages/lib/site-packages/pluggy/
+/.python_packages/lib/site-packages/iniconfig/
+/.python_packages/lib/site-packages/wheel/
+# pyarrow Flight (~20 MB). Only Parquet is used; pyarrow does not load Flight at import.
+# NOTE: do NOT exclude *substrait*: libarrow_substrait is linked by pyarrow.lib on Linux.
+/.python_packages/lib/site-packages/pyarrow/*flight*
+# pyarrow C++ headers (build-time only)
+/.python_packages/lib/site-packages/pyarrow/include/
+# Cython sources and type stubs are not needed to import compiled modules
+*.pyx
+*.pxd
+*.pxi
+*.pyi
 
 # Python cache and test artifacts
 __pycache__/

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -18,7 +19,7 @@ from azure.keyvault.secrets import SecretClient
 from dhanhq import DhanContext, DhanLogin, dhanhq
 from fyers_apiv3 import fyersModel
 
-from utils.blob_utils import BlobUtils
+from utils.blob_utils import BlobSync, BlobUtils
 from utils.env_config import EnvConfig
 
 logger = logging.getLogger(__name__)
@@ -88,19 +89,15 @@ class TokenCache:
 
     def __init__(self):
         self.is_local = BlobUtils.is_running_locally()
-        self._container_client = None
-        if not self.is_local:
-            self._container_client = BlobUtils.get_container_client(BlobUtils.BROKER_TOKEN_BLOB)
+        self._blob_sync = BlobSync()
 
     def load(self, broker: str) -> Optional[dict]:
         try:
             if self.is_local:
                 path = self.LOCAL_DIR / f"{broker}.json"
                 return json.loads(path.read_text()) if path.exists() else None
-            if not self._container_client:
-                return None
-            blob = self._container_client.get_blob_client(f"{broker}.json")
-            return json.loads(blob.download_blob().readall())
+            data = self._blob_sync.read_if_exists(BlobUtils.BROKER_TOKEN_BLOB, f"{broker}.json")
+            return json.loads(data) if data else None
         except Exception:
             return None
 
@@ -110,11 +107,9 @@ class TokenCache:
                 self.LOCAL_DIR.mkdir(parents=True, exist_ok=True)
                 (self.LOCAL_DIR / f"{broker}.json").write_text(json.dumps(token_data))
                 return
-            if not self._container_client:
-                logger.warning("MARKET_STORAGE_CONNECTION not set; skipping %s token cache", broker)
-                return
-            blob = self._container_client.get_blob_client(f"{broker}.json")
-            blob.upload_blob(json.dumps(token_data), overwrite=True)
+            self._blob_sync.upload_content_with_fallback(
+                BlobUtils.BROKER_TOKEN_BLOB, f"{broker}.json", json.dumps(token_data).encode()
+            )
         except Exception:
             logger.exception("Failed to cache %s token", broker)
 
@@ -149,6 +144,51 @@ def _safe_json(resp: requests.Response, step: str) -> dict:
             f"Fyers {step} returned a non-JSON response (status {resp.status_code}); "
             f"likely rate-limited/blocked. Body: {snippet!r}"
         ) from exc
+
+
+class _LoginGate:
+    """Process-wide guard around a broker login.
+
+    Each symbol/range/thread builds its own manager, and a manager only keeps its client
+    after a successful login. Without this, an expired token plus a failing login retries
+    the login for every call, in parallel, which gets the host rate-limited (HTTP 429).
+    The gate serialises logins, reuses a recently validated token, and backs off after a failure.
+    """
+
+    TOKEN_TTL_SECONDS = 300
+    COOLDOWN_SECONDS = 600
+
+    def __init__(self, name: str):
+        self.name = name
+        self.lock = threading.RLock()
+        self._token: Optional[str] = None
+        self._validated_at = 0.0
+        self._failed_at: Optional[float] = None
+        self._last_error = ""
+
+    def fresh_token(self) -> Optional[str]:
+        if self._token and time.monotonic() - self._validated_at < self.TOKEN_TTL_SECONDS:
+            return self._token
+        return None
+
+    def remember(self, token: str) -> None:
+        self._token = token
+        self._validated_at = time.monotonic()
+        self._failed_at = None
+
+    def raise_if_cooling_down(self) -> None:
+        if self._failed_at is None:
+            return
+        remaining = self.COOLDOWN_SECONDS - (time.monotonic() - self._failed_at)
+        if remaining > 0:
+            raise RuntimeError(
+                f"{self.name} login skipped for another {int(remaining)}s after a recent failure: {self._last_error}"
+            )
+
+    def record_failure(self, exc: Exception) -> None:
+        self._failed_at = time.monotonic()
+        self._last_error = str(exc)[:200]
+        self._token = None
 
 
 class BrokerConfig:
@@ -203,6 +243,8 @@ class FyersConfig(BrokerConfig):
     }
 
 class DhanTOTPAuthenticator:
+    _gate = _LoginGate("Dhan")
+
     def __init__(self, config: Optional[DhanConfig] = None):
         self.config = config or DhanConfig()
 
@@ -218,12 +260,32 @@ class DhanTOTPAuthenticator:
             return False
 
     def get_access_token(self, force: bool = False) -> str:
-        cache = TokenCache()
-        if not force:
-            cached = cache.load("dhan")
-            if cached and cached.get("accessToken") and self._is_valid(cached["accessToken"]):
-                return cached["accessToken"]
+        gate = self._gate
+        with gate.lock:
+            if not force:
+                token = gate.fresh_token()
+                if not token:
+                    cached = TokenCache().load("dhan")
+                    candidate = cached.get("accessToken") if cached else None
+                    if candidate and self._is_valid(candidate):
+                        gate.remember(candidate)
+                        token = candidate
+                if token:
+                    return token
 
+            gate.raise_if_cooling_down()
+            try:
+                token, expiry_time, totp = self._login()
+            except Exception as exc:
+                gate.record_failure(exc)
+                raise
+            gate.remember(token)
+
+        ConfigStore().update_value(DhanConfig.ENV_VAR, "totp", totp)
+        TokenCache().save("dhan", {"accessToken": token, "expiryTime": expiry_time})
+        return token
+
+    def _login(self) -> tuple[str, Optional[str], str]:
         if not (self.config.client_id and self.config.pin and self.config.totp_secret):
             raise RuntimeError("DHAN_CLIENT_ID, DHAN_PIN and DHAN_TOTP_SECRET must be configured")
 
@@ -237,9 +299,7 @@ class DhanTOTPAuthenticator:
             raise RuntimeError(f"Dhan token generation failed: {response}")
 
         logger.info("Dhan access token generated. Expiry: %s", response.get("expiryTime", "N/A"))
-        ConfigStore().update_value(DhanConfig.ENV_VAR, "totp", totp)
-        cache.save("dhan", {"accessToken": response["accessToken"], "expiryTime": response.get("expiryTime")})
-        return response["accessToken"]
+        return response["accessToken"], response.get("expiryTime"), totp
 
     def get_client(self):
         access_token = self.get_access_token()
@@ -248,6 +308,8 @@ class DhanTOTPAuthenticator:
 
 
 class FyersTOTPAuthenticator:
+    _gate = _LoginGate("Fyers")
+
     def __init__(self, config: Optional[FyersConfig] = None):
         self.config = config or FyersConfig()
 
@@ -329,13 +391,24 @@ class FyersTOTPAuthenticator:
 
     def _exchange_code(self, auth_code: str) -> str:
         cfg = self.config
+        app_id = (cfg.app_id or "").strip()
+        app_secret = (cfg.app_secret or "").strip()
+        missing = [
+            name
+            for name, value in (("FYERS_CONFIG.app_id", app_id), ("FYERS_APP (app secret)", app_secret))
+            if not value
+        ]
+        if missing:
+            raise RuntimeError(f"Fyers app credentials not configured; missing: {', '.join(missing)}")
+        if app_secret.startswith("@Microsoft.KeyVault"):
+            raise RuntimeError("FYERS_APP is an unresolved Key Vault reference; check the app's identity access to the vault")
         try:
             session = fyersModel.SessionModel(
-                client_id=cfg.app_id,
+                client_id=app_id,
                 redirect_uri=cfg.callback_url,
                 response_type="code",
                 state="state",
-                secret_key=cfg.app_secret,
+                secret_key=app_secret,
                 grant_type="authorization_code",
             )
             session.set_token(auth_code)
@@ -347,7 +420,7 @@ class FyersTOTPAuthenticator:
         except Exception:
             logger.exception("Fyers SDK token exchange failed")
 
-        app_id_hash = hashlib.sha256(f"{cfg.app_id}:{cfg.app_secret}".encode()).hexdigest()
+        app_id_hash = hashlib.sha256(f"{app_id}:{app_secret}".encode()).hexdigest()
         payload = {"grant_type": "authorization_code", "appIdHash": app_id_hash, "code": auth_code}
         resp = requests.post("https://api-t1.fyers.in/api/v3/validate-authcode", json=payload, timeout=10)
         if resp.status_code == 200:
@@ -356,7 +429,13 @@ class FyersTOTPAuthenticator:
             if access_token:
                 return access_token
             raise RuntimeError(f"Fyers token exchange response: {data.get('message', 'no message')}")
-        raise RuntimeError(f"Fyers token exchange failed: {resp.status_code} {resp.text}")
+        hint = ""
+        if "app id hash" in resp.text:
+            hint = (
+                f" (hint: app id and app secret do not match; app_id ends with '{app_id[-4:]}', "
+                f"app secret length {len(app_secret)} - check FYERS_APP and FYERS_CONFIG.app_id)"
+            )
+        raise RuntimeError(f"Fyers token exchange failed: {resp.status_code} {resp.text}{hint}")
 
     def _is_valid(self, raw_token: str) -> bool:
         try:
@@ -370,16 +449,29 @@ class FyersTOTPAuthenticator:
             return False
 
     def get_access_token(self, force: bool = False) -> str:
-        cache = TokenCache()
-        if not force:
-            cached = cache.load("fyers")
-            raw_token = cached.get("accessToken") if cached else None
-            if raw_token and self._is_valid(raw_token):
-                return f"{self.config.app_id}:{raw_token}"
+        gate = self._gate
+        with gate.lock:
+            if not force:
+                raw_token = gate.fresh_token()
+                if not raw_token:
+                    cached = TokenCache().load("fyers")
+                    candidate = cached.get("accessToken") if cached else None
+                    if candidate and self._is_valid(candidate):
+                        gate.remember(candidate)
+                        raw_token = candidate
+                if raw_token:
+                    return f"{self.config.app_id}:{raw_token}"
 
-        auth_code = self._login_with_totp()
-        raw_token = self._exchange_code(auth_code)
-        cache.save("fyers", {"accessToken": raw_token})
+            gate.raise_if_cooling_down()
+            try:
+                auth_code = self._login_with_totp()
+                raw_token = self._exchange_code(auth_code)
+            except Exception as exc:
+                gate.record_failure(exc)
+                raise
+            gate.remember(raw_token)
+
+        TokenCache().save("fyers", {"accessToken": raw_token})
         return f"{self.config.app_id}:{raw_token}"
 
 

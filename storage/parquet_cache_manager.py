@@ -136,6 +136,15 @@ class CacheRegistry:
         self._blob_sync = BlobSync()
 
     def load(self) -> pd.DataFrame:
+        if not BlobUtils.is_running_locally():
+            try:
+                with self._blob_sync.open_parquet(self.registry_path) as lake:
+                    df = lake.read(self.BLOB_NAME, missing_ok=True)
+                if df is not None and not df.empty:
+                    return df
+            except Exception as exc:
+                logger.warning("[REGISTRY] Failed to read registry from DataLake: %s", exc)
+
         self._blob_sync.download_if_missing(self.registry_path, self.BLOB_NAME)
         if (
             os.path.exists(self.registry_path)
@@ -160,46 +169,58 @@ class CacheRegistry:
         reason: str,
     ):
         """Persist a known market-off or data-problem interval."""
+        self.log_off_many([(symbol, interval, start_dt, end_dt, reason)])
+
+    def log_off_many(self, entries: List[Tuple[str, str, datetime, datetime, str]]):
+        """Persist several off/problem intervals with a single registry read-modify-write.
+
+        Each registry update is a blob read, lock and write in Azure, so logging many gaps one by one
+        (e.g. one per trading day) can dominate a job's run time.
+        """
+        if not entries:
+            return
         try:
             df = self.load()
-            new_row = pd.DataFrame(
-                [{
-                    "symbol": str(symbol),
-                    "interval": str(interval),
-                    "start_time": pd.to_datetime(start_dt),
-                    "end_time": pd.to_datetime(end_dt),
-                    "reason": str(reason),
-                }]
+            new_rows = pd.DataFrame(
+                [
+                    {
+                        "symbol": str(symbol),
+                        "interval": str(interval),
+                        "start_time": pd.to_datetime(start_dt),
+                        "end_time": pd.to_datetime(end_dt),
+                        "reason": str(reason),
+                    }
+                    for symbol, interval, start_dt, end_dt, reason in entries
+                ]
             )
 
-            df = pd.concat([df, new_row], ignore_index=True)
+            df = pd.concat([df, new_rows], ignore_index=True)
             df = df.drop_duplicates(
                 subset=CacheConstants.REGISTRY_COLUMNS,
                 keep="last",
             )
 
-            df.to_parquet(
-                self.registry_path,
-                engine=CacheConstants.ENGINE,
-                index=False,
-            )
-            self._blob_sync.upload(self.registry_path, self.BLOB_NAME)
+            if not BlobUtils.is_running_locally():
+                with self._blob_sync.open_parquet(self.registry_path) as lake:
+                    lake.upsert(self.BLOB_NAME, df, keys=CacheConstants.REGISTRY_COLUMNS)
+            else:
+                df.to_parquet(
+                    self.registry_path,
+                    engine=CacheConstants.ENGINE,
+                    index=False,
+                )
+                self._blob_sync.upload(self.registry_path, self.BLOB_NAME)
 
-            logger.info("[REGISTRY] %s | %s | %s → %s | %s", symbol, interval, start_dt, end_dt, reason)
+            for symbol, interval, start_dt, end_dt, reason in entries:
+                logger.info("[REGISTRY] %s | %s | %s → %s | %s", symbol, interval, start_dt, end_dt, reason)
         except Exception as exc:
             logger.warning("[REGISTRY] Failed to save log: %s", exc)
 
-    def is_logged_as_off(
-        self,
-        symbol: str,
-        interval: str,
-        check_start: datetime,
-        check_end: datetime,
-    ) -> bool:
-        """Returns True only when covered by a permanent MARKET_CLOSED/WEEKEND/MARKET_HOLIDAY entry."""
+    def off_periods(self, symbol: str, interval: str) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+        """Known off/problem periods for one symbol+interval, read from the registry once."""
         df = self.load()
         if df.empty:
-            return False
+            return []
 
         valid_off_reasons = {
             CacheConstants.MARKET_CLOSED,
@@ -213,10 +234,26 @@ class CacheRegistry:
             (df["symbol"] == str(symbol))
             & (df["interval"] == str(interval))
             & (df["reason"].isin(valid_off_reasons))
-            & (df["start_time"] <= pd.to_datetime(check_start))
-            & (df["end_time"] >= pd.to_datetime(check_end))
         ]
-        return not matches.empty
+        return [
+            (pd.to_datetime(start), pd.to_datetime(end))
+            for start, end in zip(matches["start_time"], matches["end_time"])
+        ]
+
+    def is_logged_as_off(
+        self,
+        symbol: str,
+        interval: str,
+        check_start: datetime,
+        check_end: datetime,
+    ) -> bool:
+        """Returns True only when covered by a permanent MARKET_CLOSED/WEEKEND/MARKET_HOLIDAY entry."""
+        check_start = pd.to_datetime(check_start)
+        check_end = pd.to_datetime(check_end)
+        return any(
+            start <= check_start and end >= check_end
+            for start, end in self.off_periods(symbol, interval)
+        )
 
 
 # =====================================================================
@@ -327,6 +364,9 @@ class CacheGapDetector:
         if not expected_timestamps:
             return []
 
+        # Read the registry once per call; reading it per slot is one blob request per slot in Azure.
+        off_periods = registry.off_periods(symbol, interval)
+
         missing_timestamps = []
         for timestamp in expected_timestamps:
             slot_start = timestamp
@@ -334,8 +374,10 @@ class CacheGapDetector:
 
             if timestamp in cached_timestamps:
                 continue
-            if registry.is_logged_as_off(symbol, interval, slot_start, slot_end):
-                continue
+            if off_periods:
+                check_start, check_end = pd.to_datetime(slot_start), pd.to_datetime(slot_end)
+                if any(start <= check_start and end >= check_end for start, end in off_periods):
+                    continue
 
             missing_timestamps.append(timestamp)
 
@@ -414,10 +456,12 @@ class ParquetCacheManager:
                 missing_ranges = self.gap_detector.get_missing_ranges(
                     data, fetch_start, fetch_end, interval, self.registry, symbol
                 )
-                for gap_start, gap_end in missing_ranges:
-                    self.registry.log_off(
-                        symbol, interval, gap_start, gap_end, CacheConstants.DATA_GAP
-                    )
+                self.registry.log_off_many(
+                    [
+                        (symbol, interval, gap_start, gap_end, CacheConstants.DATA_GAP)
+                        for gap_start, gap_end in missing_ranges
+                    ]
+                )
 
             dt_series = TimestampUtils.series_to_local(df["timestamp"])
             df = df[dt_series.notna()].copy()
@@ -429,7 +473,11 @@ class ParquetCacheManager:
             df["year"] = dt_series.dt.year.astype("int16")
             df["month"] = dt_series.dt.month.astype("int8")
 
-            df = self._merge_with_existing_data(symbol, interval, df)
+            # Remote upsert reads and merges under the toolkit's write lock.
+            # Sending a premerged snapshot could replay stale cached values over
+            # another writer's corrections. Local files still need this merge.
+            if BlobUtils.is_running_locally():
+                df = self._merge_with_existing_data(symbol, interval, df)
 
             self._write_partitions(symbol, interval, df)
             return True
@@ -494,7 +542,7 @@ class ParquetCacheManager:
         end_date: datetime,
         interval: str = "5",
     ) -> List[Dict]:
-        if not os.path.exists(self.cache_dir) or not os.listdir(self.cache_dir):
+        if BlobUtils.is_running_locally() and (not os.path.exists(self.cache_dir) or not os.listdir(self.cache_dir)):
             return []
 
         try:
@@ -798,13 +846,20 @@ class ParquetCacheManager:
         directory this writes to always matches exactly what `_load_partition` reads.
         """
         for (year, month), group in df.groupby(["year", "month"]):
+            write_df = group.drop(columns=["symbol", "interval", "year", "month"], errors="ignore")
+            blob_name = self._blob_name(symbol, interval, int(year), int(month))
+
+            if not BlobUtils.is_running_locally():
+                with self._blob_sync.open_parquet(self.cache_dir) as lake:
+                    lake.upsert(blob_name, write_df, keys=["timestamp"])
+                continue
+
             partition_path = self._partition_path(symbol, interval, int(year), int(month))
             os.makedirs(partition_path, exist_ok=True)
-            write_df = group.drop(columns=["symbol", "interval", "year", "month"], errors="ignore")
             table = pa.Table.from_pandas(write_df, preserve_index=False)
             file_path = os.path.join(partition_path, "part-0.parquet")
             pq.write_table(table, file_path)
-            self._blob_sync.upload(file_path, self._blob_name(symbol, interval, int(year), int(month)))
+            self._blob_sync.upload(file_path, blob_name)
 
     def _load_partition(
         self,
@@ -813,6 +868,15 @@ class ParquetCacheManager:
         year: int,
         month: int,
     ) -> pd.DataFrame:
+        if not BlobUtils.is_running_locally():
+            try:
+                with self._blob_sync.open_parquet(self.cache_dir) as lake:
+                    df = lake.read(self._blob_name(symbol, interval, year, month), missing_ok=True)
+                return df if df is not None else pd.DataFrame()
+            except Exception as exc:
+                logger.warning("[PARQUET] Failed to read remote partition for %s/%s %04d-%02d: %s", symbol, interval, year, month, exc)
+                return pd.DataFrame()
+
         partition_path = self._partition_path(symbol, interval, year, month)
         file_path = os.path.join(partition_path, "part-0.parquet")
         self._blob_sync.download_if_missing(file_path, self._blob_name(symbol, interval, year, month))

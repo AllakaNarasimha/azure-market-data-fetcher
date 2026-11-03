@@ -11,7 +11,7 @@ from storage.market_data_cache import OptionChainCacheManager
 from utils.env_config import EnvConfig
 from utils.shared_cache import EXPIRIES_CACHE
 from schedulers.market_calendar import MarketCalendar
-from schedulers.scheduler_utils import build_scheduler_context
+from schedulers.scheduler_utils import build_scheduler_context, is_market_open
 
 
 class LiveScheduler:
@@ -43,7 +43,12 @@ class LiveScheduler:
         # Route to the test-mode cache root/container when TEST_MODE is active
         # and the market is closed/holiday, so after-hours test runs don't
         # pollute the production market-data-cache container.
-        ctx = build_scheduler_context(datetime.now(IST_TZ), MarketCalendar.is_holiday, BlobUtils.is_running_locally())
+        now = datetime.now(IST_TZ)
+        ctx = build_scheduler_context(now, MarketCalendar.is_holiday, BlobUtils.is_running_locally())
+        if not is_market_open(now, MarketCalendar.is_holiday) and not ctx.use_test_cache:
+            logging.info("[LiveScheduler] Market is closed or holiday; skipping option-chain fetch")
+            return
+
         chain_cache = OptionChainCacheManager(cache_dir=ctx.test_cache_root if ctx.use_test_cache else None)
         if ctx.use_test_cache:
             logging.info("[LiveScheduler] TEST_MODE after-hours: writing cache to %s", ctx.test_cache_root)
@@ -95,10 +100,14 @@ class LiveScheduler:
         if expiries is None:
             try:
                 expiries = self._expiries_for(manager, broker_name, instrument) or []
-                EXPIRIES_CACHE[cache_key] = expiries
             except Exception as ex:
                 logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to fetch expiries: {ex!r}")
                 return
+            if not expiries:
+                # Don't cache an empty result, otherwise a transient/empty broker reply pins the symbol for the whole day.
+                logging.warning(f"[LiveScheduler] {instrument.symbol} ({broker_name}) returned no expiries; nothing to fetch")
+                return
+            EXPIRIES_CACHE[cache_key] = expiries
 
         expiry_list = []
         try:
@@ -107,6 +116,10 @@ class LiveScheduler:
             # Malformed/unexpected expiry entries (missing keys, wrong shape, etc.)
             # must not abort the whole batch's asyncio.gather - log and skip this symbol.
             logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to resolve expiry range: {ex!r}")
+            return
+
+        if not expiry_list:
+            logging.warning(f"[LiveScheduler] {instrument.symbol} ({broker_name}) no expiries in range; nothing to fetch")
             return
 
         responses: list[tuple] = []
@@ -123,9 +136,15 @@ class LiveScheduler:
                 rows = chain_cache.save_fyers_responses_batch(
                     instrument.symbol, responses, source=broker_name, fetched_at=None, batch_second=batch_second
                 )
-                logging.info(
-                    f"[LiveScheduler] {instrument.symbol} ({broker_name}) option chain cached "
-                    f"({rows} rows across {len(responses)} expiries)"
-                )
+                if rows:
+                    logging.info(
+                        f"[LiveScheduler] {instrument.symbol} ({broker_name}) option chain cached "
+                        f"({rows} rows across {len(responses)} expiries)"
+                    )
+                else:
+                    logging.warning(
+                        f"[LiveScheduler] {instrument.symbol} ({broker_name}) option chain returned no rows "
+                        f"for {len(responses)} expiries; nothing cached"
+                    )
             except Exception as ex:
                 logging.exception(f"[LiveScheduler] {instrument.symbol} ({broker_name}) failed to save batched option chain: {ex!r}")
