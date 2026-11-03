@@ -10,6 +10,8 @@ from utils.env_config import EnvConfig
 from storage.market_data_storage_client import MarketDataStorageClient
 from schedulers.live_scheduler import LiveScheduler
 from schedulers.daily_scheduler import DailyScheduler
+from schedulers.market_calendar import MarketCalendar
+from schedulers.scheduler_utils import is_market_open
 from app_settings import (
     IST_TZ,
     TEST_MODE,
@@ -43,8 +45,10 @@ TEST_MODE_ONCE_CRON = "0 0 0 1 1 *"
 # The daily job covers many symbols and days of history and may not finish in one invocation, so it polls every
 # 10 minutes inside market hours (04:00-10:59 UTC; DailyScheduler itself only runs 09:15-16:00 IST on trading days).
 # Each run continues where the last stopped and exits immediately once the day's work is complete, so
-# the data is still fetched once per day. In TEST_MODE it polls around the clock after the startup run.
+# the data is still fetched once per day.
 DAILY_JOB_CRON = "0 */10 * * * *" if TEST_MODE else "0 */10 4-10 * * 1-5"
+if TEST_MODE and not is_market_open(datetime.now(IST_TZ), MarketCalendar.is_holiday):
+    DAILY_JOB_CRON = TEST_MODE_ONCE_CRON
 DAILY_JOB_TIME_BUDGET_SECONDS = float(EnvConfig.env("DAILY_JOB_TIME_BUDGET_SECONDS", "480") or "480")
 
 # 11:30 UTC = 17:00 IST, after market close; DailyScheduler.run_backup skips holidays and weekends itself.

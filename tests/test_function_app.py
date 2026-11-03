@@ -126,6 +126,29 @@ def test_daily_timer_runs_on_startup_in_test_mode(monkeypatch):
     assert daily_binding["runOnStartup"] is True
 
 
+@pytest.mark.parametrize(
+    "test_mode, market_open, expected_schedule, run_on_startup",
+    [
+        (True, False, "0 0 0 1 1 *", True),
+        (True, True, "0 */10 * * * *", True),
+        (False, False, "0 */10 4-10 * * 1-5", False),
+        (False, True, "0 */10 4-10 * * 1-5", False),
+    ],
+)
+def test_daily_timer_only_runs_once_for_after_hours_test_mode(
+    monkeypatch, test_mode, market_open, expected_schedule, run_on_startup
+):
+    monkeypatch.setitem(EnvConfig._overrides, "TEST_MODE", "true" if test_mode else "false")
+    monkeypatch.setattr("schedulers.scheduler_utils.is_market_open", lambda now, is_holiday: market_open)
+
+    fa = setupDependencies(monkeypatch, minutes=5, test_mode=test_mode)
+    functions = {function.get_function_name(): function for function in fa.app.get_functions()}
+    daily_binding = functions["daily_job"].get_bindings_dict()["bindings"][0]
+
+    assert daily_binding["schedule"] == expected_schedule
+    assert daily_binding["runOnStartup"] is run_on_startup
+
+
 def test_option_chain_test_path_routes_to_test_container(monkeypatch):
     local_path = "/tmp/test_mode_data/market_data_cache/option_chain/underlying=NSE%3ANIFTY50-INDEX/part-0.parquet"
     blob_name = "option_chain/underlying=NSE%3ANIFTY50-INDEX/part-0.parquet"
