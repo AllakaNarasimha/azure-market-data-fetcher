@@ -167,6 +167,15 @@ class DailyScheduler:
                 logging.info("[DailyScheduler] Deleting backed-up container: DELETE_AFTER_BACKUP=true; container=%s", container)
                 if not backup_service.delete_source_container():
                     logging.error("[DailyScheduler] Backup sent but container %s could not be deleted", container)
+                else:
+                    try:
+                        message_id = backup_service.notify_container_deleted(result)
+                        logging.info(
+                            "[DailyScheduler] Container deletion notification sent: container=%s telegram_message_id=%d",
+                            container, message_id,
+                        )
+                    except Exception:
+                        logging.exception("[DailyScheduler] Container %s deleted but Telegram notification failed", container)
         return success
 
     def _run_task(self, progress, task: str, label: str, symbol: str, work) -> bool | None:

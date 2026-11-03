@@ -64,6 +64,24 @@ class TelegramService:
                 "check network connectivity and bot configuration"
             ) from None
 
+        return self._message_id(response, "document")
+
+    def send_message(self, text: str) -> int:
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{self._bot_token}/sendMessage",
+                data={"chat_id": self._chat_id, "text": text},
+                timeout=(30, 60),
+            )
+        except requests.RequestException as exc:
+            raise TelegramUploadError(
+                f"Telegram request failed ({type(exc).__name__}); "
+                "check network connectivity and bot configuration"
+            ) from None
+
+        return self._message_id(response, "message")
+
+    def _message_id(self, response: requests.Response, kind: str) -> int:
         try:
             payload = response.json()
         except ValueError:
@@ -76,7 +94,7 @@ class TelegramService:
             # Redact token defensively even if a remote error mentions it.
             description = description.replace(self._bot_token, "[REDACTED]")
             raise TelegramUploadError(
-                f"Telegram rejected document (HTTP {response.status_code}): "
+                f"Telegram rejected {kind} (HTTP {response.status_code}): "
                 f"{description}"
             )
 
