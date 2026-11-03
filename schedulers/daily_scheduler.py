@@ -15,6 +15,7 @@ from schedulers.daily_progress import DailyProgress
 from schedulers.market_calendar import MarketCalendar
 from schedulers.scheduler_utils import build_scheduler_context
 from schedulers.live_scheduler import LiveScheduler
+from services.market_data_backup_service import MarketDataBackupService
 
 
 class DailyBudgetExceeded(Exception):
@@ -113,6 +114,48 @@ class DailyScheduler:
         else:
             logging.warning("=== Daily Job paused: time budget used up; remaining symbols continue on the next run ===")
         return complete
+
+    def run_backup(self) -> bool:
+        """Zip the day's market-data container and send it to Telegram, once per trading day.
+
+        Returns True when the backup is done (now or earlier today) or not needed, False when it failed.
+        """
+        IST_TZ = pytz.timezone(MarketTimes.timezone())
+        now = datetime.now(IST_TZ)
+
+        if not EnvConfig.test_mode() and MarketCalendar.is_holiday(now):
+            logging.info("[DailyScheduler] Market holiday. Skipping backup.")
+            return True
+
+        ctx = build_scheduler_context(now, MarketCalendar.is_holiday, BlobUtils.is_running_locally())
+        container = BlobUtils.test_mode_cache_blob() if ctx.use_test_cache else BlobUtils.market_data_cache_blob()
+
+        # Separate progress key so the backup never overwrites the daily job's progress record.
+        progress = DailyProgress(f"{self._run_key(now)}_backup", container=container, local_dir=ctx.test_cache_root)
+        task = f"backup:{container}"
+        if progress.is_finished(task):
+            logging.info("[DailyScheduler] Backup already handled for %s; nothing to do", progress.run_key)
+            return True
+
+        try:
+            backup_service = MarketDataBackupService(container_name=container)
+            result = backup_service.run()
+            logging.info(
+                "[DailyScheduler] Backup sent: container=%s blobs=%d zip_bytes=%d telegram_message_id=%d",
+                result.container, result.blob_count, result.zip_bytes, result.telegram_message_id,
+            )
+            success = True
+        except Exception as ex:
+            logging.exception(f"[DailyScheduler] Backup failed for container {container}: {ex!r}")
+            success = False
+        progress.record(task, success)
+
+        if success and EnvConfig.delete_after_backup():
+            if BlobUtils.is_running_locally():
+                logging.warning("[DailyScheduler] DELETE_AFTER_BACKUP ignored on a local run; container %s kept", container)
+            elif not backup_service.delete_source_container():
+                logging.error("[DailyScheduler] Backup sent but container %s could not be deleted", container)
+        return success
 
     def _run_task(self, progress, task: str, label: str, symbol: str, work) -> bool | None:
         """Run one symbol's work. Returns None when the time budget is used up (caller must stop).

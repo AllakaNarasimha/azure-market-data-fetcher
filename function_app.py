@@ -47,6 +47,9 @@ TEST_MODE_ONCE_CRON = "0 0 0 1 1 *"
 DAILY_JOB_CRON = "0 */10 * * * *" if TEST_MODE else "0 */10 4-10 * * 1-5"
 DAILY_JOB_TIME_BUDGET_SECONDS = float(EnvConfig.env("DAILY_JOB_TIME_BUDGET_SECONDS", "480") or "480")
 
+# 11:30 UTC = 17:00 IST, after market close; DailyScheduler.run_backup skips holidays and weekends itself.
+BACKUP_JOB_CRON = "0 30 11 * * 1-5"
+
 if ENABLE_BACKGROUND_TRIGGERS:
     @app.schedule(
         schedule=DAILY_JOB_CRON,
@@ -62,6 +65,19 @@ if ENABLE_BACKGROUND_TRIGGERS:
             logging.info(f"[daily_job] finished; all symbols done for today: {complete}")
         except Exception as ex:
             logging.exception(f"[daily_job] DailyScheduler.run() failed: {ex!r}")
+
+    @app.timer_trigger(
+        schedule=BACKUP_JOB_CRON,
+        arg_name="backupTimer",
+        run_on_startup=False,
+        use_monitor=True,
+    )
+    def daily_market_backup(backupTimer: func.TimerRequest) -> None:
+        try:
+            ok = DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run_backup()
+            logging.info(f"[daily_market_backup] finished; backup ok: {ok}")
+        except Exception as ex:
+            logging.exception(f"[daily_market_backup] DailyScheduler.run_backup() failed: {ex!r}")
 
 
 if ENABLE_BACKGROUND_TRIGGERS:
