@@ -1,4 +1,4 @@
-"""Stream a market-data Blob container into a ZIP and send it to Telegram."""
+"""Stream market data and broker master blobs into one ZIP and send it to Telegram."""
 
 import logging
 import tempfile
@@ -27,7 +27,7 @@ class BackupResult:
 
 
 class MarketDataBackupService:
-    """Read-only backup of one Blob container; no source blobs are deleted."""
+    """Back up market data and broker masters; cleanup targets only market data."""
 
     def __init__(self, container_name: Optional[str] = None, blob_sync: Optional[BlobSync] = None) -> None:
         self.container_name = container_name or BlobUtils.market_data_cache_blob()
@@ -55,17 +55,15 @@ class MarketDataBackupService:
             f"Blob container deleted after successful backup\n"
             f"Container: {self.container_name}\n"
             f"Date: {now:%Y-%m-%d %H:%M:%S} {now.tzname()}\n"
-            f"Backed-up blobs: {result.blob_count}\n"
-            f"Source data: {result.source_bytes:,} bytes\n"
+            f"Total backed-up blobs (market data and broker masters): {result.blob_count}\n"
+            f"Total source data: {result.source_bytes:,} bytes\n"
             f"Backup ZIP: {result.zip_bytes:,} bytes\n"
             f"Backup message ID: {result.telegram_message_id}"
         )
 
     def run(self) -> BackupResult:
         telegram = TelegramService.from_environment()  # Fail before download.
-        container_client = self._blob_sync.get_container(self.container_name)
-        if not container_client:
-            raise RuntimeError(f"No storage connection; cannot back up container '{self.container_name}'")
+        containers = list(dict.fromkeys((self.container_name, BlobUtils.BROKER_DATA_BLOB)))
 
         now = datetime.now(pytz.timezone(MarketTimes.timezone()))
         with tempfile.TemporaryDirectory(prefix="market-backup-") as tmp:
@@ -73,26 +71,32 @@ class MarketDataBackupService:
             blob_count = 0
             source_bytes = 0
 
-            logger.info("[Backup] Creating backup for container=%s", self.container_name)
+            logger.info("[Backup] Creating backup for containers=%s", containers)
 
             # Stream each blob straight into the ZIP so the container is never staged uncompressed on disk.
             with ZipFile(zip_path, mode="w", compression=ZIP_DEFLATED, compresslevel=6, allowZip64=True) as archive:
-                for blob in self._blob_sync.list_blobs(self.container_name):
-                    if blob.name.endswith("/"):
-                        continue  # Virtual folder marker.
+                for container_name in containers:
+                    container_client = self._blob_sync.get_container(container_name)
+                    if not container_client:
+                        raise RuntimeError(f"No storage connection; cannot back up container '{container_name}'")
+                    container_blob_count = 0
+                    for blob in self._blob_sync.list_blobs(container_name):
+                        if blob.name.endswith("/"):
+                            continue
 
-                    entry_name = f"{self.container_name}/{self._safe_blob_name(blob.name)}"
-                    downloader = container_client.download_blob(blob.name, max_concurrency=2)
-                    with archive.open(entry_name, mode="w", force_zip64=True) as entry:
-                        for chunk in downloader.chunks():
-                            entry.write(chunk)
-                            source_bytes += len(chunk)
-                    blob_count += 1
-
-            if blob_count == 0:
-                raise RuntimeError(
-                    f"No blobs found in container {self.container_name!r}; refusing to send an empty backup"
-                )
+                        entry_name = f"{container_name}/{self._safe_blob_name(blob.name)}"
+                        downloader = container_client.download_blob(blob.name, max_concurrency=2)
+                        with archive.open(entry_name, mode="w", force_zip64=True) as entry:
+                            for chunk in downloader.chunks():
+                                entry.write(chunk)
+                                source_bytes += len(chunk)
+                        container_blob_count += 1
+                    if container_blob_count == 0:
+                        raise RuntimeError(
+                            f"No blobs found in container {container_name!r}; refusing to send an incomplete backup"
+                        )
+                    blob_count += container_blob_count
+                    logger.info("[Backup] Archived container=%s blobs=%d", container_name, container_blob_count)
 
             zip_bytes = zip_path.stat().st_size
             logger.info("[Backup] ZIP created: blobs=%d source_bytes=%d zip_bytes=%d", blob_count, source_bytes, zip_bytes)
@@ -100,7 +104,7 @@ class MarketDataBackupService:
             message_id = telegram.send_document(
                 zip_path,
                 caption=(
-                    f"Market data backup: {self.container_name}\n"
+                    f"Market data and broker master backup: {', '.join(containers)}\n"
                     f"Date: {now:%Y-%m-%d %H:%M} {now.tzname()}\n"
                     f"Blobs: {blob_count} | ZIP: {zip_bytes:,} bytes"
                 ),
