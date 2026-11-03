@@ -33,6 +33,6 @@ stages:
     sourceBranch: '$(Build.SourceBranch)'
     sourceBranchShort: '$(sourceBranchShort)'
     sourceVersionMessage: '$(sourceVersionMessage)'
-    allowNonMasterDeploy: true
+    allowNonMasterDeploy: false
     installAzureDataToolkit: true
     publishAzureArtifacts: false
