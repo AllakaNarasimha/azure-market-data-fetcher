@@ -156,11 +156,17 @@ class DailyScheduler:
             success = False
         progress.record(task, success)
 
-        if success and EnvConfig.delete_after_backup():
+        if not success:
+            logging.info("[DailyScheduler] Container deletion skipped: backup failed; container=%s", container)
+        elif not EnvConfig.delete_after_backup():
+            logging.info("[DailyScheduler] Container deletion skipped: DELETE_AFTER_BACKUP=false; container=%s", container)
+        else:
             if BlobUtils.is_running_locally():
                 logging.warning("[DailyScheduler] DELETE_AFTER_BACKUP ignored on a local run; container %s kept", container)
-            elif not backup_service.delete_source_container():
-                logging.error("[DailyScheduler] Backup sent but container %s could not be deleted", container)
+            else:
+                logging.info("[DailyScheduler] Deleting backed-up container: DELETE_AFTER_BACKUP=true; container=%s", container)
+                if not backup_service.delete_source_container():
+                    logging.error("[DailyScheduler] Backup sent but container %s could not be deleted", container)
         return success
 
     def _run_task(self, progress, task: str, label: str, symbol: str, work) -> bool | None:
