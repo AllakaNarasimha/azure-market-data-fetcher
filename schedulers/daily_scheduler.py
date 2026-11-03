@@ -127,11 +127,17 @@ class DailyScheduler:
             logging.info("[DailyScheduler] Market holiday. Skipping backup.")
             return True
 
-        ctx = build_scheduler_context(now, MarketCalendar.is_holiday, BlobUtils.is_running_locally())
-        container = BlobUtils.test_mode_cache_blob() if ctx.use_test_cache else BlobUtils.market_data_cache_blob()
+        if EnvConfig.test_mode():
+            if EnvConfig.get_test_mode_expiry() is None or EnvConfig.is_test_mode_active(now):
+                logging.info("[DailyScheduler] TEST_MODE window still open; backup waits until it ends")
+                return True
+            # The live-vs-test cache decision no longer applies once the window ends; never touch the live container.
+            container = BlobUtils.test_mode_cache_blob()
+        else:
+            container = BlobUtils.market_data_cache_blob()
 
         # Separate progress key so the backup never overwrites the daily job's progress record.
-        progress = DailyProgress(f"{self._run_key(now)}_backup", container=container, local_dir=ctx.test_cache_root)
+        progress = DailyProgress(f"{self._run_key(now)}_backup", container=container)
         task = f"backup:{container}"
         if progress.is_finished(task):
             logging.info("[DailyScheduler] Backup already handled for %s; nothing to do", progress.run_key)

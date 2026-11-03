@@ -48,7 +48,8 @@ DAILY_JOB_CRON = "0 */10 * * * *" if TEST_MODE else "0 */10 4-10 * * 1-5"
 DAILY_JOB_TIME_BUDGET_SECONDS = float(EnvConfig.env("DAILY_JOB_TIME_BUDGET_SECONDS", "480") or "480")
 
 # 11:30 UTC = 17:00 IST, after market close; DailyScheduler.run_backup skips holidays and weekends itself.
-BACKUP_JOB_CRON = "0 30 11 * * 1-5"
+# In TEST_MODE it polls every minute; run_backup waits for the TEST_MODE window to end, then runs once per app start.
+BACKUP_JOB_CRON = "0 * * * * *" if TEST_MODE else "0 30 11 * * 1-5"
 
 if ENABLE_BACKGROUND_TRIGGERS:
     @app.schedule(
