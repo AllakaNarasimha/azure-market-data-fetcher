@@ -423,6 +423,25 @@ class BlobSync:
             self._containers[container_name] = BlobUtils.get_container_client(container_name, self._connection_string)
         return self._containers[container_name]
 
+    def delete_container(self, container_name: str) -> bool:
+        """Delete the container with all its blobs. Returns False when it could not be deleted."""
+        container_client = self.get_container(container_name)
+        if not container_client:
+            logger.warning("[BLOB SYNC] No container client available for container '%s'", container_name)
+            return False
+        try:
+            container_client.delete_container()
+        except ResourceNotFoundError:
+            pass
+        except Exception:
+            logger.exception("[BLOB SYNC] Failed to delete container '%s'", container_name)
+            return False
+        # Drop cached clients so the next writer recreates the container.
+        self._containers.pop(container_name, None)
+        BlobUtils.forget_container(container_name, self._connection_string)
+        logger.info("[BLOB SYNC] Deleted container '%s'", container_name)
+        return True
+
     def _require_container(self, container_name: str) -> ContainerClient:
         container_client = self.get_container(container_name)
         if not container_client:

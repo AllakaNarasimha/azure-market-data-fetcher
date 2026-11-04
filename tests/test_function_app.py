@@ -126,6 +126,26 @@ def test_daily_timer_runs_on_startup_in_test_mode(monkeypatch):
     assert daily_binding["runOnStartup"] is True
 
 
+@pytest.mark.parametrize(
+    "test_mode, expected_schedule, run_on_startup",
+    [
+        (True, "0 0 0 1 1 *", True),
+        (False, "0 0,10,20,30,40 3 * * 1-5", False),
+    ],
+)
+def test_daily_timer_runs_once_per_start_in_test_mode(
+    monkeypatch, test_mode, expected_schedule, run_on_startup
+):
+    monkeypatch.setitem(EnvConfig._overrides, "TEST_MODE", "true" if test_mode else "false")
+
+    fa = setupDependencies(monkeypatch, minutes=5, test_mode=test_mode)
+    functions = {function.get_function_name(): function for function in fa.app.get_functions()}
+    daily_binding = functions["daily_job"].get_bindings_dict()["bindings"][0]
+
+    assert daily_binding["schedule"] == expected_schedule
+    assert daily_binding["runOnStartup"] is run_on_startup
+
+
 def test_option_chain_test_path_routes_to_test_container(monkeypatch):
     local_path = "/tmp/test_mode_data/market_data_cache/option_chain/underlying=NSE%3ANIFTY50-INDEX/part-0.parquet"
     blob_name = "option_chain/underlying=NSE%3ANIFTY50-INDEX/part-0.parquet"
@@ -902,7 +922,7 @@ def test_background_triggers_registered(monkeypatch):
     assert "option_chain_fetcher" in functions
 
     daily_binding = functions["daily_job"].get_bindings_dict()["bindings"][0]
-    assert daily_binding["schedule"] == "0 */10 4-10 * * 1-5"
+    assert daily_binding["schedule"] == "0 0,10,20,30,40 3 * * 1-5"
     assert daily_binding["runOnStartup"] is False
 
     chain_binding = functions["option_chain_fetcher"].get_bindings_dict()["bindings"][0]
@@ -910,7 +930,7 @@ def test_background_triggers_registered(monkeypatch):
     assert chain_binding["runOnStartup"] is False
 
 
-def test_test_mode_runs_jobs_on_startup_and_daily_job_resumes(monkeypatch):
+def test_test_mode_runs_jobs_once_on_startup(monkeypatch):
     fa = setupDependencies(monkeypatch, minutes=5, symbols="NSE:A-EQ,NSE:B-EQ")
     functions = {function.get_function_name(): function for function in fa.app.get_functions()}
 
@@ -920,7 +940,7 @@ def test_test_mode_runs_jobs_on_startup_and_daily_job_resumes(monkeypatch):
 
     daily = functions["daily_job"].get_bindings_dict()["bindings"][0]
     assert daily["runOnStartup"] is True
-    assert daily["schedule"] == "0 */10 * * * *"
+    assert daily["schedule"] == fa.TEST_MODE_ONCE_CRON
 
 
 def test_test_mode_option_chain_fetcher_runs_every_batch_once(monkeypatch):
