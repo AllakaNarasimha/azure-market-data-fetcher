@@ -40,12 +40,17 @@ ENABLE_BACKGROUND_TRIGGERS = True
 # This cron only fires on Jan 1st, so it never triggers during a test session.
 TEST_MODE_ONCE_CRON = "0 0 0 1 1 *"
 
-# The daily job covers many symbols and days of history and may not finish in one invocation, so it polls every
-# 10 minutes inside market hours (04:00-10:59 UTC; DailyScheduler itself only runs 09:15-16:00 IST on trading days).
-# Each run continues where the last stopped and exits immediately once the day's work is complete, so
-# the data is still fetched once per day. In TEST_MODE it polls around the clock after the startup run.
-DAILY_JOB_CRON = "0 */10 * * * *" if TEST_MODE else "0 */10 4-10 * * 1-5"
+# History doesn't need a live session, so the daily job runs pre-market (08:30-09:10 IST = 03:00-03:40 UTC),
+# well before the 09:15 IST open, so LiveScheduler never contends with it for broker calls once trading starts.
+# One run is normally enough; the 10-minute poll inside this window only exists so a slow first attempt can
+# resume (progress is recorded per symbol) instead of leaving the day's data half-fetched.
+# In TEST_MODE the job runs once per app start (run_on_startup), same as option_chain_fetcher.
+DAILY_JOB_CRON = TEST_MODE_ONCE_CRON if TEST_MODE else "0 0,10,20,30,40 3 * * 1-5"
 DAILY_JOB_TIME_BUDGET_SECONDS = float(EnvConfig.env("DAILY_JOB_TIME_BUDGET_SECONDS", "480") or "480")
+
+# 11:30 UTC = 17:00 IST, after market close; DailyScheduler.run_backup skips holidays and weekends itself.
+# In TEST_MODE it polls every minute; run_backup waits for the TEST_MODE window to end, then runs once per app start.
+BACKUP_JOB_CRON = "0 * * * * *" if TEST_MODE else "0 30 11 * * 1-5"
 
 if ENABLE_BACKGROUND_TRIGGERS:
     @app.schedule(
@@ -62,6 +67,19 @@ if ENABLE_BACKGROUND_TRIGGERS:
             logging.info(f"[daily_job] finished; all symbols done for today: {complete}")
         except Exception as ex:
             logging.exception(f"[daily_job] DailyScheduler.run() failed: {ex!r}")
+
+    @app.timer_trigger(
+        schedule=BACKUP_JOB_CRON,
+        arg_name="backupTimer",
+        run_on_startup=False,
+        use_monitor=True,
+    )
+    def daily_market_backup(backupTimer: func.TimerRequest) -> None:
+        try:
+            ok = DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run_backup()
+            logging.info(f"[daily_market_backup] finished; backup ok: {ok}")
+        except Exception as ex:
+            logging.exception(f"[daily_market_backup] DailyScheduler.run_backup() failed: {ex!r}")
 
 
 if ENABLE_BACKGROUND_TRIGGERS:

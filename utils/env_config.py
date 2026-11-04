@@ -173,6 +173,11 @@ class EnvConfig:
         return cls.env("TEST_MODE_CACHE_BLOB", "test-mode-data") or "test-mode-data"
 
     @classmethod
+    def delete_after_backup(cls) -> bool:
+        """Delete the backed-up container once the backup is sent (env `DELETE_AFTER_BACKUP`). Default: false."""
+        return (cls.env("DELETE_AFTER_BACKUP", "false") or "").strip().lower() == "true"
+
+    @classmethod
     def load_local_settings(cls, path: str = "local.settings.json", require_local_run: bool = True) -> bool:
         """Load `local.settings.json` into overrides when running locally.
 
