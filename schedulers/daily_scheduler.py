@@ -145,8 +145,8 @@ class DailyScheduler:
             backup_service = MarketDataBackupService(container_name=container)
             result = backup_service.run()
             logging.info(
-                "[DailyScheduler] Backup sent: container=%s blobs=%d zip_bytes=%d telegram_message_id=%d",
-                result.container, result.blob_count, result.zip_bytes, result.telegram_message_id,
+                "[DailyScheduler] Backup sent: container=%s blobs=%d zip_bytes=%d telegram_message_ids=%s",
+                result.container, result.blob_count, result.zip_bytes, result.telegram_message_ids,
             )
             success = True
         except Exception as ex:

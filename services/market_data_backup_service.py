@@ -1,6 +1,9 @@
 """Stream market data and broker master blobs into one ZIP and send it to Telegram."""
 
+import glob
 import logging
+import math
+import shutil
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,6 +19,8 @@ from utils.market_times import MarketTimes
 
 logger = logging.getLogger(__name__)
 
+TEMP_DIR_PREFIX = "market-backup-"
+
 
 @dataclass(frozen=True)
 class BackupResult:
@@ -23,7 +28,7 @@ class BackupResult:
     blob_count: int
     source_bytes: int
     zip_bytes: int
-    telegram_message_id: int
+    telegram_message_ids: tuple[int, ...]
 
 
 class MarketDataBackupService:
@@ -45,6 +50,13 @@ class MarketDataBackupService:
             raise ValueError(f"Unsafe blob path in container: {blob_name!r}")
         return blob_name
 
+    @staticmethod
+    def _clear_stale_temp_dirs() -> None:
+        """Remove leftover `market-backup-*` dirs from a prior run that never reached cleanup."""
+        pattern = str(Path(tempfile.gettempdir()) / f"{TEMP_DIR_PREFIX}*")
+        for stale_dir in glob.glob(pattern):
+            shutil.rmtree(stale_dir, ignore_errors=True)
+
     def delete_source_container(self) -> bool:
         """Delete the backed-up container; call only after `run()` succeeded."""
         return self._blob_sync.delete_container(self.container_name)
@@ -58,15 +70,19 @@ class MarketDataBackupService:
             f"Total backed-up blobs (market data and broker masters): {result.blob_count}\n"
             f"Total source data: {result.source_bytes:,} bytes\n"
             f"Backup ZIP: {result.zip_bytes:,} bytes\n"
-            f"Backup message ID: {result.telegram_message_id}"
+            f"Backup message ID(s): {', '.join(str(i) for i in result.telegram_message_ids)}"
         )
 
     def run(self) -> BackupResult:
         telegram = TelegramService.from_environment()  # Fail before download.
         containers = list(dict.fromkeys((self.container_name, BlobUtils.BROKER_DATA_BLOB)))
 
+        # Warm Azure Functions instances share one OS temp dir across invocations; remove any
+        # leftover backup dirs from a crashed prior run before adding new data to it.
+        self._clear_stale_temp_dirs()
+
         now = datetime.now(pytz.timezone(MarketTimes.timezone()))
-        with tempfile.TemporaryDirectory(prefix="market-backup-") as tmp:
+        with tempfile.TemporaryDirectory(prefix=TEMP_DIR_PREFIX) as tmp:
             zip_path = Path(tmp) / f"{self.container_name}_{now:%Y%m%d_%H%M%S}.zip"
             blob_count = 0
             source_bytes = 0
@@ -101,19 +117,51 @@ class MarketDataBackupService:
             zip_bytes = zip_path.stat().st_size
             logger.info("[Backup] ZIP created: blobs=%d source_bytes=%d zip_bytes=%d", blob_count, source_bytes, zip_bytes)
 
-            message_id = telegram.send_document(
-                zip_path,
-                caption=(
+            parts = self._split_for_telegram(zip_path, telegram.MAX_DOCUMENT_BYTES)
+            if len(parts) > 1:
+                logger.info("[Backup] ZIP exceeds Telegram limit; split into %d parts", len(parts))
+
+            message_ids = []
+            for index, part_path in enumerate(parts, start=1):
+                caption = (
                     f"Market data and broker master backup: {', '.join(containers)}\n"
                     f"Date: {now:%Y-%m-%d %H:%M} {now.tzname()}\n"
                     f"Blobs: {blob_count} | ZIP: {zip_bytes:,} bytes"
-                ),
-            )
+                )
+                if len(parts) > 1:
+                    part_names = "+".join(p.name for p in parts)
+                    caption += (
+                        f"\nPart {index}/{len(parts)} of split archive: {part_path.name}\n\n"
+                        f"How to combine after downloading all parts:\n\n"
+                        f"Windows (Command Prompt):\n"
+                        f"copy /b {part_names} {zip_path.name}\n\n"
+                        f"Mac/Linux (Terminal):\n"
+                        f"cat {zip_path.name}.part-* > {zip_path.name}\n"
+                        f"unzip -t {zip_path.name}"
+                    )
+                message_ids.append(telegram.send_document(part_path, caption=caption))
 
             return BackupResult(
                 container=self.container_name,
                 blob_count=blob_count,
                 source_bytes=source_bytes,
                 zip_bytes=zip_bytes,
-                telegram_message_id=message_id,
+                telegram_message_ids=tuple(message_ids),
             )
+
+    @staticmethod
+    def _split_for_telegram(zip_path: Path, max_bytes: int) -> list[Path]:
+        """Split a ZIP into sequential byte-range parts so each upload fits Telegram's document limit."""
+        size = zip_path.stat().st_size
+        if size <= max_bytes:
+            return [zip_path]
+
+        total_parts = math.ceil(size / max_bytes)
+        parts: list[Path] = []
+        with zip_path.open("rb") as source:
+            for index in range(total_parts):
+                chunk = source.read(max_bytes)
+                part_path = zip_path.with_name(f"{zip_path.name}.part-{index:04d}")
+                part_path.write_bytes(chunk)
+                parts.append(part_path)
+        return parts
