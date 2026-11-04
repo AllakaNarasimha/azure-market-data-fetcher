@@ -44,6 +44,8 @@ class DailyScheduler:
     def run(self, time_budget_seconds: float | None = None) -> bool:
         """Fetch history and option chains for every configured symbol.
 
+        Runs pre-market (history does not need a live session, and the option-chain task only
+        prefetches expiries/a baseline snapshot for LiveScheduler to reuse once the market opens).
         With `time_budget_seconds` the run is resumable: progress is recorded per symbol, work stops cleanly
         when the budget is used up, and the next invocation continues with the remaining symbols. Returns True
         when nothing is left to do for today.
@@ -51,12 +53,8 @@ class DailyScheduler:
         IST_TZ = pytz.timezone(MarketTimes.timezone())
         now = datetime.now(IST_TZ)
 
-        # Build scheduler context via EnvConfig helpers when needed
-        market_open = now.replace(hour=MarketTimes.open().hour, minute=MarketTimes.open().minute, second=0, microsecond=0)
-        market_close = now.replace(hour=MarketTimes.close().hour, minute=MarketTimes.close().minute, second=0, microsecond=0)
-
-        if not EnvConfig.test_mode() and not ((market_open <= now <= market_close) and not MarketCalendar.is_holiday(now)):
-            logging.info("Market is closed or holiday. Skipping daily job.")
+        if not EnvConfig.test_mode() and MarketCalendar.is_holiday(now):
+            logging.info("Market holiday. Skipping daily job.")
             return True
 
         symbols = EnvConfig.watchlist_symbols()

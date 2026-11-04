@@ -10,8 +10,6 @@ from utils.env_config import EnvConfig
 from storage.market_data_storage_client import MarketDataStorageClient
 from schedulers.live_scheduler import LiveScheduler
 from schedulers.daily_scheduler import DailyScheduler
-from schedulers.market_calendar import MarketCalendar
-from schedulers.scheduler_utils import is_market_open
 from app_settings import (
     IST_TZ,
     TEST_MODE,
@@ -42,13 +40,12 @@ ENABLE_BACKGROUND_TRIGGERS = True
 # This cron only fires on Jan 1st, so it never triggers during a test session.
 TEST_MODE_ONCE_CRON = "0 0 0 1 1 *"
 
-# The daily job covers many symbols and days of history and may not finish in one invocation, so it polls every
-# 10 minutes inside market hours (04:00-10:59 UTC; DailyScheduler itself only runs 09:15-16:00 IST on trading days).
-# Each run continues where the last stopped and exits immediately once the day's work is complete, so
-# the data is still fetched once per day.
-DAILY_JOB_CRON = "0 */10 * * * *" if TEST_MODE else "0 */10 4-10 * * 1-5"
-if TEST_MODE and not is_market_open(datetime.now(IST_TZ), MarketCalendar.is_holiday):
-    DAILY_JOB_CRON = TEST_MODE_ONCE_CRON
+# History doesn't need a live session, so the daily job runs pre-market (08:30-09:10 IST = 03:00-03:40 UTC),
+# well before the 09:15 IST open, so LiveScheduler never contends with it for broker calls once trading starts.
+# One run is normally enough; the 10-minute poll inside this window only exists so a slow first attempt can
+# resume (progress is recorded per symbol) instead of leaving the day's data half-fetched.
+# In TEST_MODE the job runs once per app start (run_on_startup), same as option_chain_fetcher.
+DAILY_JOB_CRON = TEST_MODE_ONCE_CRON if TEST_MODE else "0 0,10,20,30,40 3 * * 1-5"
 DAILY_JOB_TIME_BUDGET_SECONDS = float(EnvConfig.env("DAILY_JOB_TIME_BUDGET_SECONDS", "480") or "480")
 
 # 11:30 UTC = 17:00 IST, after market close; DailyScheduler.run_backup skips holidays and weekends itself.
