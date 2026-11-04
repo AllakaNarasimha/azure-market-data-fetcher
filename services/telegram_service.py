@@ -1,10 +1,14 @@
 """Upload backup ZIP files to a Telegram group via the Bot API."""
 
+import logging
+import time
 from pathlib import Path
 
 import requests
 
 from utils.env_config import EnvConfig
+
+logger = logging.getLogger(__name__)
 
 
 class TelegramUploadError(RuntimeError):
@@ -14,6 +18,9 @@ class TelegramUploadError(RuntimeError):
 class TelegramService:
     # Conservative limit below Telegram Bot API's standard 50 MB document limit.
     MAX_DOCUMENT_BYTES = 49_000_000
+    # Flaky connectivity (e.g. mid-upload resets) is common for large uploads; retry before giving up.
+    MAX_SEND_ATTEMPTS = 3
+    RETRY_BACKOFF_SECONDS = 5
 
     def __init__(self, bot_token: str, chat_id: str):
         if not bot_token or not chat_id:
@@ -43,43 +50,57 @@ class TelegramService:
 
         url = f"https://api.telegram.org/bot{self._bot_token}/sendDocument"
 
-        try:
-            with zip_path.open("rb") as archive:
-                response = requests.post(
-                    url,
-                    data={"chat_id": self._chat_id, "caption": caption[:1024]},
-                    files={
-                        "document": (
-                            zip_path.name,
-                            archive,
-                            "application/zip",
-                        )
-                    },
-                    timeout=(30, 600),
+        for attempt in range(1, self.MAX_SEND_ATTEMPTS + 1):
+            try:
+                with zip_path.open("rb") as archive:
+                    response = requests.post(
+                        url,
+                        data={"chat_id": self._chat_id, "caption": caption[:1024]},
+                        files={
+                            "document": (
+                                zip_path.name,
+                                archive,
+                                "application/zip",
+                            )
+                        },
+                        timeout=(30, 600),
+                    )
+                return self._message_id(response, "document")
+            except requests.RequestException as exc:
+                if attempt == self.MAX_SEND_ATTEMPTS:
+                    # Do not include exception URLs in logs: Telegram URLs contain bot tokens.
+                    raise TelegramUploadError(
+                        f"Telegram request failed ({type(exc).__name__}) after {attempt} attempts; "
+                        "check network connectivity and bot configuration"
+                    ) from None
+                logger.warning(
+                    "[Telegram] Document upload attempt %d/%d failed (%s); retrying in %ds",
+                    attempt, self.MAX_SEND_ATTEMPTS, type(exc).__name__, self.RETRY_BACKOFF_SECONDS * attempt,
                 )
-        except requests.RequestException as exc:
-            # Do not include exception URLs in logs: Telegram URLs contain bot tokens.
-            raise TelegramUploadError(
-                f"Telegram request failed ({type(exc).__name__}); "
-                "check network connectivity and bot configuration"
-            ) from None
-
-        return self._message_id(response, "document")
+                time.sleep(self.RETRY_BACKOFF_SECONDS * attempt)
 
     def send_message(self, text: str) -> int:
-        try:
-            response = requests.post(
-                f"https://api.telegram.org/bot{self._bot_token}/sendMessage",
-                data={"chat_id": self._chat_id, "text": text},
-                timeout=(30, 60),
-            )
-        except requests.RequestException as exc:
-            raise TelegramUploadError(
-                f"Telegram request failed ({type(exc).__name__}); "
-                "check network connectivity and bot configuration"
-            ) from None
+        url = f"https://api.telegram.org/bot{self._bot_token}/sendMessage"
 
-        return self._message_id(response, "message")
+        for attempt in range(1, self.MAX_SEND_ATTEMPTS + 1):
+            try:
+                response = requests.post(
+                    url,
+                    data={"chat_id": self._chat_id, "text": text},
+                    timeout=(30, 60),
+                )
+                return self._message_id(response, "message")
+            except requests.RequestException as exc:
+                if attempt == self.MAX_SEND_ATTEMPTS:
+                    raise TelegramUploadError(
+                        f"Telegram request failed ({type(exc).__name__}) after {attempt} attempts; "
+                        "check network connectivity and bot configuration"
+                    ) from None
+                logger.warning(
+                    "[Telegram] Message send attempt %d/%d failed (%s); retrying in %ds",
+                    attempt, self.MAX_SEND_ATTEMPTS, type(exc).__name__, self.RETRY_BACKOFF_SECONDS * attempt,
+                )
+                time.sleep(self.RETRY_BACKOFF_SECONDS * attempt)
 
     def _message_id(self, response: requests.Response, kind: str) -> int:
         try:
