@@ -4,18 +4,38 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 import pytz
+from azure.core.exceptions import ResourceNotFoundError
 
 import brokers.broker_data_manager as bdm
+import schedulers.daily_progress as daily_progress_module
+import schedulers.daily_scheduler as daily_scheduler_module
 import schedulers.live_scheduler as live_scheduler_module
-from schedulers.scheduler_utils import is_market_open
+from schedulers.scheduler_utils import build_scheduler_context, is_market_open
 from schedulers.market_calendar import MarketCalendar
 from utils.market_times import MarketTimes
 from utils.cache_utils import is_test_blob_path, test_blob_name as build_test_blob_name
 from utils.env_config import EnvConfig
 from utils.shared_cache import EXPIRIES_CACHE
+
+
+@pytest.fixture
+def market_session(monkeypatch):
+    fixed_now = pytz.timezone(MarketTimes.timezone()).localize(datetime(2026, 11, 5, 10))
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz is not None else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(daily_scheduler_module, "datetime", FixedDateTime)
+    monkeypatch.setattr(live_scheduler_module, "datetime", FixedDateTime)
+    monkeypatch.setattr(EnvConfig, "is_test_mode_active", classmethod(lambda cls, now: cls.test_mode()))
+    return fixed_now
+
 
 def setupDependencies(monkeypatch, minutes: int = 1, test_mode: bool = True, symbols: str | None = None):
     """Arrange and return the loaded `function_app` module (TEST_MODE enabled by default).
@@ -95,11 +115,13 @@ def test_market_hours_guard_includes_open_close_and_excludes_closed_times():
     assert not is_market_open(after_close, MarketCalendar.is_holiday)
 
 
-def test_live_scheduler_does_not_create_cache_when_market_is_closed(monkeypatch):
-    monkeypatch.setenv("TEST_MODE", "false")
+@pytest.mark.parametrize("test_mode", [False, True])
+def test_live_scheduler_does_not_create_cache_when_market_is_closed(monkeypatch, test_mode):
+    monkeypatch.setenv("TEST_MODE", "true" if test_mode else "false")
     monkeypatch.setattr(EnvConfig, "_overrides", {})
     timezone = pytz.timezone(MarketTimes.timezone())
     closed_time = timezone.localize(datetime(2026, 10, 23, 16, 1))
+    monkeypatch.setattr(EnvConfig, "_TEST_MODE_EXPIRY", closed_time + timedelta(minutes=5))
 
     class FixedDateTime(datetime):
         @classmethod
@@ -114,6 +136,26 @@ def test_live_scheduler_does_not_create_cache_when_market_is_closed(monkeypatch)
     )
 
     live_scheduler_module.LiveScheduler().run(symbols=["NSE:TEST-EQ"])
+
+
+@pytest.mark.parametrize("test_mode", [False, True])
+def test_daily_scheduler_does_not_collect_after_market_close(monkeypatch, test_mode):
+    fixed_now = pytz.timezone(MarketTimes.timezone()).localize(datetime(2026, 11, 5, 16, 1))
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+
+    monkeypatch.setattr(EnvConfig, "_overrides", {"TEST_MODE": "true" if test_mode else "false"})
+    monkeypatch.setattr(EnvConfig, "_TEST_MODE_EXPIRY", fixed_now + timedelta(minutes=5))
+    monkeypatch.setattr(daily_scheduler_module, "datetime", FixedDateTime)
+    monkeypatch.setattr(
+        daily_scheduler_module, "ParquetCacheManager",
+        lambda **kwargs: pytest.fail("must not create a cache after market close"),
+    )
+
+    assert daily_scheduler_module.DailyScheduler().run(time_budget_seconds=60) is True
 
 
 def test_daily_timer_runs_on_startup_in_test_mode(monkeypatch):
@@ -168,7 +210,7 @@ def test_test_mode_completion_logged_once(monkeypatch, caplog):
     assert len(completion_logs) == 1
 
 
-def test_daily_prefetch_populates_expiries_cache(monkeypatch):
+def test_daily_prefetch_populates_expiries_cache(monkeypatch, market_session):
     fa = setupDependencies(monkeypatch, minutes=5)
 
     # Use a small, controlled symbol list and fake manager to avoid external calls.
@@ -195,13 +237,13 @@ def test_daily_prefetch_populates_expiries_cache(monkeypatch):
     EXPIRIES_CACHE.clear()
     fa.DailyScheduler().run()
 
-    today = datetime.now(fa.IST_TZ).strftime("%Y-%m-%d")
+    today = market_session.strftime("%Y-%m-%d")
     cache_key = ("fyers", "NSE:TEST-EQ", today)
     assert cache_key in EXPIRIES_CACHE
     assert isinstance(EXPIRIES_CACHE[cache_key], list)
 
 
-def test_daily_prefetch_logs_warning_when_no_expiries(monkeypatch, caplog):
+def test_daily_prefetch_logs_warning_when_no_expiries(monkeypatch, caplog, market_session):
     fa = setupDependencies(monkeypatch, minutes=5)
 
     # DailyScheduler reads symbols via EnvConfig, so override it there (not on `fa`).
@@ -478,7 +520,7 @@ def test_gap_detection_skips_slots_covered_by_registry(tmp_path, monkeypatch):
     assert ranges == []
 
 
-def test_daily_scheduler_one_failing_symbol_does_not_stop_others(monkeypatch):
+def test_daily_scheduler_one_failing_symbol_does_not_stop_others(monkeypatch, market_session):
     fa = setupDependencies(monkeypatch, minutes=5, symbols="NSE:A-EQ,NSE:B-EQ,NSE:C-EQ")
     monkeypatch.setitem(EnvConfig._overrides, "WATCHLIST_SYMBOLS", "NSE:A-EQ,NSE:B-EQ,NSE:C-EQ")
 
@@ -509,7 +551,7 @@ def test_daily_scheduler_one_failing_symbol_does_not_stop_others(monkeypatch):
     assert "NSE:B-EQ" not in seen
 
 
-def test_daily_scheduler_unexpected_symbol_error_does_not_stop_others(monkeypatch):
+def test_daily_scheduler_unexpected_symbol_error_does_not_stop_others(monkeypatch, market_session):
     fa = setupDependencies(monkeypatch, minutes=5, symbols="NSE:A-EQ,NSE:B-EQ,NSE:C-EQ")
     monkeypatch.setitem(EnvConfig._overrides, "WATCHLIST_SYMBOLS", "NSE:A-EQ,NSE:B-EQ,NSE:C-EQ")
     monkeypatch.setattr(bdm.InstrumentResolver, "resolve", staticmethod(lambda s: type("Instr", (), {"symbol": s})()))
@@ -542,7 +584,7 @@ def test_daily_scheduler_unexpected_symbol_error_does_not_stop_others(monkeypatc
     assert chains == ["NSE:B-EQ", "NSE:C-EQ"]
 
 
-def test_live_scheduler_one_failing_symbol_does_not_stop_others(monkeypatch):
+def test_live_scheduler_one_failing_symbol_does_not_stop_others(monkeypatch, market_session):
     fa = setupDependencies(monkeypatch, minutes=5)
     fetched = []
 
@@ -643,7 +685,7 @@ def _daily_scheduler_for_resume(monkeypatch, tmp_path, symbols, chain_symbols=""
     return fa, scheduler, calls
 
 
-def test_daily_job_resumes_where_the_budget_ran_out(monkeypatch, tmp_path):
+def test_daily_job_resumes_where_the_budget_ran_out(monkeypatch, tmp_path, market_session):
     fa, scheduler, calls = _daily_scheduler_for_resume(monkeypatch, tmp_path, "NSE:A-EQ,NSE:B-EQ,NSE:C-EQ")
     # Budget runs out after one symbol's work has been done.
     out_of_time = iter([False, False, True, True, True, True])
@@ -664,7 +706,7 @@ def test_daily_job_resumes_where_the_budget_ran_out(monkeypatch, tmp_path):
     assert calls == []
 
 
-def test_daily_job_completed_day_is_not_rerun_but_a_new_start_is(monkeypatch, tmp_path):
+def test_daily_job_completed_day_is_not_rerun_but_a_new_start_is(monkeypatch, tmp_path, market_session):
     fa, scheduler, calls = _daily_scheduler_for_resume(monkeypatch, tmp_path, "NSE:A-EQ,NSE:B-EQ")
     assert scheduler.run(time_budget_seconds=60) is True
     assert sorted(set(calls)) == ["NSE:A-EQ", "NSE:B-EQ"]
@@ -679,7 +721,7 @@ def test_daily_job_completed_day_is_not_rerun_but_a_new_start_is(monkeypatch, tm
     assert sorted(set(calls)) == ["NSE:A-EQ", "NSE:B-EQ"]
 
 
-def test_daily_job_failing_symbol_is_retried_a_limited_number_of_times(monkeypatch, tmp_path):
+def test_daily_job_failing_symbol_is_retried_a_limited_number_of_times(monkeypatch, tmp_path, market_session):
     fa, scheduler, calls = _daily_scheduler_for_resume(
         monkeypatch, tmp_path, "NSE:A-EQ,NSE:B-EQ", outcome={"NSE:A-EQ": False}
     )
@@ -691,7 +733,7 @@ def test_daily_job_failing_symbol_is_retried_a_limited_number_of_times(monkeypat
     assert calls.count("NSE:B-EQ") == 1
 
 
-def test_daily_job_without_budget_does_not_write_progress(monkeypatch, tmp_path):
+def test_daily_job_without_budget_does_not_write_progress(monkeypatch, tmp_path, market_session):
     fa, scheduler, calls = _daily_scheduler_for_resume(monkeypatch, tmp_path, "NSE:A-EQ")
 
     assert scheduler.run() is True
@@ -721,13 +763,12 @@ def test_daily_progress_round_trips_through_blob_storage(monkeypatch):
         def get_blob_client(self, name):
             return FakeBlob(name)
 
-    class FakeSync:
-        def get_container(self, name):
-            assert name == "cache-container"
-            return FakeContainer()
+    def get_container(name):
+        assert name == "cache-container"
+        return FakeContainer()
 
     monkeypatch.setattr(dp.BlobUtils, "is_running_locally", staticmethod(lambda: False))
-    monkeypatch.setattr(dp, "BlobSync", FakeSync)
+    monkeypatch.setattr(dp.BlobUtils, "get_container_client", staticmethod(get_container))
 
     progress = dp.DailyProgress("2026-10-26", container="cache-container")
     assert progress.pending(["history:A", "history:B"]) == ["history:A", "history:B"]
@@ -830,7 +871,7 @@ def test_fyers_ok_reply_and_non_rate_limit_errors_are_not_retried(monkeypatch):
     assert len(calls) == 2
 
 
-def test_daily_job_retries_a_symbol_whose_option_chain_came_back_empty(monkeypatch, tmp_path):
+def test_daily_job_retries_a_symbol_whose_option_chain_came_back_empty(monkeypatch, tmp_path, market_session):
     fa, scheduler, calls = _daily_scheduler_for_resume(monkeypatch, tmp_path, "", chain_symbols="NSE:A-EQ,NSE:B-EQ")
     attempts = []
 
@@ -874,7 +915,7 @@ def test_live_scheduler_does_not_cache_empty_expiries_and_logs(monkeypatch, capl
     assert any("returned no expiries" in r.message for r in caplog.records)
 
 
-def test_live_scheduler_fetches_batch_concurrently(monkeypatch):
+def test_live_scheduler_fetches_batch_concurrently(monkeypatch, market_session):
     """A PARALLEL_BATCH_SIZE (5) symbol batch should be fetched concurrently,
     not one-by-one, so the broker sees ~5 overlapping calls within the same
     second instead of 5 calls spread out sequentially.
@@ -995,4 +1036,185 @@ def test_option_chain_fetcher_batches_symbols(monkeypatch):
     assert 0 <= batch_second < 60
     assert 0 < len(batch_symbols) <= fa.PARALLEL_BATCH_SIZE
     assert all(s in symbols for s in batch_symbols)
+
+
+@pytest.mark.parametrize("backup_succeeds", [False, True])
+@pytest.mark.parametrize("delete_failures", [0, 2, 3])
+@pytest.mark.parametrize("test_mode", [False, True])
+def test_backup_stops_after_three_failures_or_success_despite_restart_and_deletion(monkeypatch, backup_succeeds, delete_failures, test_mode):
+    fixed_now = pytz.timezone(MarketTimes.timezone()).localize(datetime(2026, 11, 5, 17))
+    containers = {"test-cache": {}}
+    calls = []
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+
+    class FakeBlob:
+        def __init__(self, container, name):
+            self.container = container
+            self.name = name
+
+        def download_blob(self):
+            if self.name not in containers[self.container]:
+                raise ResourceNotFoundError("missing")
+            return SimpleNamespace(readall=lambda: containers[self.container][self.name])
+
+        def upload_blob(self, data, overwrite=False):
+            containers[self.container][self.name] = data
+
+    def get_container(name):
+        containers.setdefault(name, {})
+        return SimpleNamespace(get_blob_client=lambda blob_name: FakeBlob(name, blob_name))
+
+    class FakeBackup:
+        def __init__(self, container_name):
+            assert container_name == "test-cache"
+
+        def run(self):
+            calls.append("backup")
+            if not backup_succeeds:
+                raise ResourceNotFoundError("ContainerNotFound")
+            return SimpleNamespace(container="test-cache", blob_count=1, zip_bytes=10, telegram_message_ids=(1,))
+
+        def delete_source_container(self):
+            calls.append("delete")
+            if calls.count("delete") <= delete_failures:
+                return False
+            containers.pop("test-cache", None)
+            return True
+
+        def notify_container_deleted(self, result):
+            return 2
+
+    monkeypatch.setattr(EnvConfig, "_overrides", {
+        "TEST_MODE": "true" if test_mode else "false", "TEST_MODE_CACHE_BLOB": "test-cache",
+        "MARKET_DATA_CACHE_BLOB": "test-cache", "DELETE_AFTER_BACKUP": "true",
+    })
+    monkeypatch.setattr(EnvConfig, "_TEST_MODE_EXPIRY", fixed_now - timedelta(minutes=1))
+    monkeypatch.setattr(daily_scheduler_module, "datetime", FixedDateTime)
+    monkeypatch.setattr(daily_scheduler_module.BlobUtils, "is_running_locally", staticmethod(lambda: False))
+    monkeypatch.setattr(daily_scheduler_module, "MarketDataBackupService", FakeBackup)
+    monkeypatch.setattr(daily_progress_module.BlobUtils, "get_container_client", staticmethod(get_container))
+
+    for restart in range(5):
+        monkeypatch.setattr(EnvConfig, "_TEST_MODE_START", fixed_now - timedelta(minutes=10, seconds=restart))
+        daily_scheduler_module.DailyScheduler().run_backup()
+
+    assert calls.count("backup") == (1 if backup_succeeds else 3)
+    assert calls.count("delete") == (min(delete_failures + 1, 3) if backup_succeeds else 0)
+    assert "scheduler-state" in containers
+    if backup_succeeds and delete_failures < 3:
+        assert "test-cache" not in containers
+
+
+def test_active_test_session_uses_test_cache_during_market_hours(monkeypatch, market_session):
+    monkeypatch.setattr(EnvConfig, "_overrides", {"TEST_MODE": "true"})
+
+    context = build_scheduler_context(market_session, MarketCalendar.is_holiday, is_local=False)
+
+    assert context.use_test_cache is True
+    assert "test_mode_data" in context.test_cache_root
+
+
+def test_live_backup_has_three_attempt_slots(monkeypatch):
+    monkeypatch.setitem(EnvConfig._overrides, "TEST_MODE", "false")
+    fa = setupDependencies(monkeypatch, test_mode=False)
+    functions = {function.get_function_name(): function for function in fa.app.get_functions()}
+    binding = functions["daily_market_backup"].get_bindings_dict()["bindings"][0]
+
+    assert binding["schedule"] == "0 30-32 11 * * 1-5"
+    assert binding["runOnStartup"] is False
+    assert fa.DYNAMIC_OPTION_CHAIN_CRON.split()[2] == "3-10"
+
+
+@pytest.mark.parametrize("failure", ["read", "write", "missing_connection", "corrupt_state"])
+def test_backup_does_not_run_without_durable_attempt_state(monkeypatch, failure):
+    class FakeBlob:
+        def download_blob(self):
+            if failure == "read":
+                raise RuntimeError("state read failed")
+            if failure == "corrupt_state":
+                return SimpleNamespace(readall=lambda: b"invalid json")
+            raise ResourceNotFoundError("missing")
+
+        def upload_blob(self, data, overwrite=False):
+            raise RuntimeError("state write failed")
+
+    container = None if failure == "missing_connection" else SimpleNamespace(get_blob_client=lambda name: FakeBlob())
+    monkeypatch.setattr(EnvConfig, "_overrides", {"TEST_MODE": "false"})
+    monkeypatch.setattr(MarketCalendar, "is_holiday", staticmethod(lambda now: False))
+    monkeypatch.setattr(daily_progress_module.BlobUtils, "is_running_locally", staticmethod(lambda: False))
+    monkeypatch.setattr(daily_progress_module.BlobUtils, "get_container_client", staticmethod(lambda name: container))
+    monkeypatch.setattr(
+        daily_scheduler_module, "MarketDataBackupService",
+        lambda **kwargs: pytest.fail("backup must not start without durable attempt state"),
+    )
+
+    with pytest.raises((RuntimeError, ValueError)):
+        daily_scheduler_module.DailyScheduler().run_backup()
+
+
+def test_expired_test_mode_does_not_fall_back_to_live_collection(monkeypatch, market_session):
+    monkeypatch.setattr(EnvConfig, "_overrides", {"TEST_MODE": "true"})
+    monkeypatch.setattr(EnvConfig, "is_test_mode_active", classmethod(lambda cls, now: False))
+    monkeypatch.setattr(
+        daily_scheduler_module, "ParquetCacheManager",
+        lambda **kwargs: pytest.fail("expired test mode must not collect history"),
+    )
+    monkeypatch.setattr(
+        live_scheduler_module, "OptionChainCacheManager",
+        lambda **kwargs: pytest.fail("expired test mode must not collect option chains"),
+    )
+
+    assert daily_scheduler_module.DailyScheduler().run(time_budget_seconds=60) is True
+    live_scheduler_module.LiveScheduler().run(symbols=["NSE:TEST-EQ"])
+
+
+def test_daily_history_still_runs_before_market_open(monkeypatch, tmp_path, market_session):
+    _, scheduler, calls = _daily_scheduler_for_resume(monkeypatch, tmp_path, "NSE:A-EQ")
+    premarket_time = market_session.replace(hour=8, minute=30)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return premarket_time if tz is not None else premarket_time.replace(tzinfo=None)
+
+    monkeypatch.setattr(EnvConfig, "_overrides", {"TEST_MODE": "false", "WATCHLIST_SYMBOLS": "NSE:A-EQ"})
+    monkeypatch.setattr(daily_scheduler_module, "datetime", FixedDateTime)
+
+    assert scheduler.run(time_budget_seconds=60) is True
+    assert calls == ["NSE:A-EQ"]
+
+
+def test_live_scheduler_stops_starting_expiries_when_market_closes(monkeypatch, market_session):
+    monkeypatch.setattr(EnvConfig, "_overrides", {"TEST_MODE": "false"})
+    clock = [market_session.replace(hour=15, minute=59)]
+    calls = []
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0] if tz is not None else clock[0].replace(tzinfo=None)
+
+    class FakeManager:
+        def get_expiries(self, instrument):
+            return ["first", "second"]
+
+        def get_option_chain(self, instrument, strikecount, expiries):
+            calls.append(expiries)
+            clock[0] = clock[0].replace(hour=16, minute=1)
+            return {"data": {}}
+
+    cache = SimpleNamespace(save_fyers_responses_batch=lambda *args, **kwargs: 1)
+    monkeypatch.setattr(live_scheduler_module, "datetime", FixedDateTime)
+    monkeypatch.setattr(bdm.ExpiryResolver, "resolve_range", staticmethod(lambda expiries, **kwargs: expiries))
+    monkeypatch.setattr(live_scheduler_module, "EXPIRIES_CACHE", {})
+
+    live_scheduler_module.LiveScheduler()._fetch_option_chain_range(
+        FakeManager(), "fyers", SimpleNamespace(symbol="NSE:CLOSE-EQ"), cache,
+    )
+
+    assert calls == ["first"]
 

@@ -127,7 +127,9 @@ class BlobSync:
         self._test_container_client = None
         if self.is_running_live:
             self._container_client = self.get_container(BlobUtils.market_data_cache_blob())
-            self._test_container_client = self.get_container(BlobUtils.test_mode_cache_blob())
+            # Only create the test-mode container when TEST_MODE is actually enabled
+            if EnvConfig.test_mode():
+                self._test_container_client = self.get_container(BlobUtils.test_mode_cache_blob())
             if not self._container_client:
                 self.is_running_live = False
         logger.info(

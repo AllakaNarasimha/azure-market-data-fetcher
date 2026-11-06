@@ -105,6 +105,31 @@ class MasterFileCache:
             resp.raise_for_status()
             return resp.content
 
+    @classmethod
+    def cleanup_old_dated_folders(cls) -> None:
+        """Delete every dated (DDMMYYYY) folder in the broker-master container except today's.
+
+        Each MasterFileCache.get() call writes under a fresh today_folder, so
+        once that folder exists the prior days' folders are stale and can be
+        removed to stop the container growing without bound.
+        """
+        if BlobUtils.is_running_locally():
+            return
+        container_client = BlobUtils.get_container_client(cls.CONTAINER)
+        if not container_client:
+            return
+
+        today_folder = datetime.now().strftime("%d%m%Y")
+        try:
+            folders = {blob.name.split("/", 1)[0] for blob in container_client.list_blobs() if "/" in blob.name}
+            for folder in folders - {today_folder}:
+                blob_names = [blob.name for blob in container_client.list_blobs(name_starts_with=f"{folder}/")]
+                for blob_name in blob_names:
+                    container_client.delete_blob(blob_name)
+                logger.info("[MasterFileCache] Deleted old dated folder '%s' (%d blobs) from '%s'", folder, len(blob_names), cls.CONTAINER)
+        except Exception:
+            logger.exception("[MasterFileCache] Failed to clean up old dated folders in '%s'", cls.CONTAINER)
+
 
 class DhanSecurityMaster:
     """Resolves Dhan's numeric security_id from the public Dhan scrip master CSV.

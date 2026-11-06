@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-import pytz
 from typing import Callable, Optional, Tuple
 from pathlib import Path
 import tempfile
 
-from utils.market_times import MarketTimes
 from utils.env_config import EnvConfig
 
 TEST_CACHE_DIRNAME = "test_mode_data"
@@ -36,29 +34,8 @@ def test_blob_name(blob_name: str) -> str:
 
 
 def should_use_test_cache(test_mode: bool, now: Optional[datetime] = None, is_holiday: Optional[Callable[[datetime], bool]] = None, is_local: bool = True) -> Tuple[bool, Optional[str]]:
-    """Decide whether to route writes to the test-mode cache.
-
-    Returns (use_test_cache, test_cache_root_or_None).
-    - `test_mode`: whether TEST_MODE is enabled
-    - `now`: current datetime in Asia/Kolkata (if None, uses now())
-    - `is_holiday`: callable taking a datetime and returning True if holiday
-    """
-    tz = pytz.timezone(MarketTimes.timezone())
-    now = now or datetime.now(tz)
-
-    market_open = now.replace(
-        hour=MarketTimes.open().hour, minute=MarketTimes.open().minute, second=0, microsecond=0
-    )
-    # Some callers expect market_close to be end-of-day inclusive; keep same minute precision
-    market_close = now.replace(
-        hour=MarketTimes.close().hour, minute=MarketTimes.close().minute, second=0, microsecond=0
-    )
-
-    market_closed = not (market_open <= now <= market_close)
-    market_holiday = is_holiday(now) if is_holiday is not None else False
-
-    use_test_cache = test_mode and (market_closed or market_holiday)
-    if use_test_cache:
+    """Return an isolated cache root for an active test run, regardless of market hours."""
+    if test_mode:
         # Place the test_mode_data folder as a sibling to the canonical
         # `market_data_cache` root. This yields e.g. `test_mode_data/market_data_cache`
         # alongside the existing `market_data_cache` directory instead of nested inside it.

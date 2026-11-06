@@ -11,7 +11,7 @@ from storage.parquet_cache_manager import ParquetCacheManager
 from storage.market_data_cache import OptionChainCacheManager
 from utils.env_config import EnvConfig
 from utils.shared_cache import EXPIRIES_CACHE
-from schedulers.daily_progress import DailyProgress
+from schedulers.daily_progress import DailyProgress, STATUS_DONE
 from schedulers.market_calendar import MarketCalendar
 from schedulers.scheduler_utils import build_scheduler_context
 from schedulers.live_scheduler import LiveScheduler
@@ -30,7 +30,12 @@ class DailyScheduler:
         self._deadline: float | None = None
 
     def _out_of_time(self) -> bool:
-        return self._deadline is not None and time.monotonic() >= self._deadline
+        now = datetime.now(pytz.timezone(MarketTimes.timezone()))
+        return (
+            now.time() > MarketTimes.close()
+            or (EnvConfig.test_mode() and not EnvConfig.is_test_mode_active(now))
+            or (self._deadline is not None and time.monotonic() >= self._deadline)
+        )
 
     @staticmethod
     def _run_key(now: datetime) -> str:
@@ -53,20 +58,25 @@ class DailyScheduler:
         IST_TZ = pytz.timezone(MarketTimes.timezone())
         now = datetime.now(IST_TZ)
 
-        if not EnvConfig.test_mode() and MarketCalendar.is_holiday(now):
+        if now.time() > MarketTimes.close():
+            logging.info("[DailyScheduler] Market has closed. Skipping daily job.")
+            return True
+        if EnvConfig.test_mode() and not EnvConfig.is_test_mode_active(now):
+            logging.info("[DailyScheduler] TEST_MODE window ended. Skipping daily job.")
+            return True
+        if MarketCalendar.is_holiday(now):
             logging.info("Market holiday. Skipping daily job.")
+            # Still prune old broker-master folders even when the rest of the job is skipped
+            bdm.MasterFileCache.cleanup_old_dated_folders()
             return True
 
         symbols = EnvConfig.watchlist_symbols()
         option_chain_symbols = EnvConfig.option_chain_symbols()
 
-        # Route to the test-mode cache root/container when TEST_MODE is active
-        # and the market is closed/holiday, so after-hours test runs don't
-        # pollute the production market-data-cache container.
         ctx = build_scheduler_context(now, MarketCalendar.is_holiday, BlobUtils.is_running_locally())
         test_cache_dir = ctx.test_cache_root if ctx.use_test_cache else None
         if ctx.use_test_cache:
-            logging.info("[DailyScheduler] TEST_MODE after-hours: writing cache to %s", ctx.test_cache_root)
+            logging.info("[DailyScheduler] TEST_MODE: writing cache to %s", ctx.test_cache_root)
 
         progress: DailyProgress | None = None
         self._deadline = None
@@ -110,7 +120,7 @@ class DailyScheduler:
         if complete:
             logging.info("=== Daily Job Completed ===")
         else:
-            logging.warning("=== Daily Job paused: time budget used up; remaining symbols continue on the next run ===")
+            logging.warning("=== Daily Job paused: time budget or collection window ended ===")
         return complete
 
     def run_backup(self) -> bool:
@@ -134,13 +144,14 @@ class DailyScheduler:
         else:
             container = BlobUtils.market_data_cache_blob()
 
-        # Separate progress key so the backup never overwrites the daily job's progress record.
-        progress = DailyProgress(f"{self._run_key(now)}_backup", container=container)
+        mode = "test" if EnvConfig.test_mode() else "live"
+        progress = DailyProgress(f"{now:%Y-%m-%d}_{mode}_backup", container="scheduler-state", strict=True)
         task = f"backup:{container}"
         if progress.is_finished(task):
             logging.info("[DailyScheduler] Backup already handled for %s; nothing to do", progress.run_key)
-            return True
+            return progress.tasks.get(task) == STATUS_DONE
 
+        progress.record(task, False)
         try:
             backup_service = MarketDataBackupService(container_name=container)
             result = backup_service.run()
@@ -152,10 +163,13 @@ class DailyScheduler:
         except Exception as ex:
             logging.exception(f"[DailyScheduler] Backup failed for container {container}: {ex!r}")
             success = False
-        progress.record(task, success)
+        if success:
+            progress.record(task, True)
 
         if not success:
             logging.info("[DailyScheduler] Container deletion skipped: backup failed; container=%s", container)
+            if progress.is_finished(task):
+                logging.error("[DailyScheduler] Backup stopped after %d attempts; container=%s", progress.MAX_ATTEMPTS, container)
         elif not EnvConfig.delete_after_backup():
             logging.info("[DailyScheduler] Container deletion skipped: DELETE_AFTER_BACKUP=false; container=%s", container)
         else:
@@ -163,17 +177,24 @@ class DailyScheduler:
                 logging.warning("[DailyScheduler] DELETE_AFTER_BACKUP ignored on a local run; container %s kept", container)
             else:
                 logging.info("[DailyScheduler] Deleting backed-up container: DELETE_AFTER_BACKUP=true; container=%s", container)
-                if not backup_service.delete_source_container():
-                    logging.error("[DailyScheduler] Backup sent but container %s could not be deleted", container)
-                else:
+                for attempt in range(1, progress.MAX_ATTEMPTS + 1):
                     try:
-                        message_id = backup_service.notify_container_deleted(result)
-                        logging.info(
-                            "[DailyScheduler] Container deletion notification sent: container=%s telegram_message_id=%d",
-                            container, message_id,
-                        )
+                        deleted = backup_service.delete_source_container()
                     except Exception:
-                        logging.exception("[DailyScheduler] Container %s deleted but Telegram notification failed", container)
+                        logging.exception("[DailyScheduler] Container deletion attempt %d failed; container=%s", attempt, container)
+                        deleted = False
+                    if deleted:
+                        try:
+                            message_id = backup_service.notify_container_deleted(result)
+                            logging.info(
+                                "[DailyScheduler] Container deletion notification sent: container=%s telegram_message_id=%d",
+                                container, message_id,
+                            )
+                        except Exception:
+                            logging.exception("[DailyScheduler] Container %s deleted but Telegram notification failed", container)
+                        break
+                else:
+                    logging.error("[DailyScheduler] Container deletion stopped after %d attempts; container=%s", progress.MAX_ATTEMPTS, container)
         return success
 
     def _run_task(self, progress, task: str, label: str, symbol: str, work) -> bool | None:
@@ -245,6 +266,9 @@ class DailyScheduler:
                 logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) failed to prefetch expiries: {ex!r}")
 
             saved = bool(self._fetch_option_chain(manager, broker_name, instrument, chain_cache)) or saved
+        # Keep only today's dated folder in broker-master; drop prior days' master CSVs
+        bdm.MasterFileCache.cleanup_old_dated_folders()
+
         return saved
 
     def _fetch_history_if_missing(self, manager, broker_name, instrument, candle_cache, start_date, end_date) -> bool:
