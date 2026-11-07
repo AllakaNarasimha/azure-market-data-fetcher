@@ -42,6 +42,15 @@ def _fyers_error(response) -> Optional[tuple]:
     return None
 
 
+def fyers_error_text(response) -> str:
+    """Return 'code=... message=...' for a Fyers error reply, else an empty string."""
+    error = _fyers_error(response)
+    if error is None:
+        return ""
+    code, message = error
+    return f"code={code} message={message!r}"
+
+
 def _is_rate_limited(code, message: str) -> bool:
     text = message.lower()
     return code == 429 or "limit" in text or "too many" in text
@@ -72,11 +81,14 @@ class MasterFileCache:
             dated_dir.mkdir(parents=True, exist_ok=True)
             path = dated_dir / filename
             if path.exists():
+                logger.info("[MasterFileCache] Local hit: %s", path)
                 return path.read_bytes()
 
+            logger.info("[MasterFileCache] Local miss: downloading %s from %s", filename, download_url)
             resp = requests.get(download_url, timeout=30)
             resp.raise_for_status()
             path.write_bytes(resp.content)
+            logger.info("[MasterFileCache] Saved %s (%d bytes) to %s", filename, len(resp.content), path)
             return path.read_bytes()
 
         if not self._blob_sync.get_container(self.CONTAINER):
@@ -91,12 +103,15 @@ class MasterFileCache:
         try:
             cached = self._blob_sync.read_if_exists(self.CONTAINER, blob_path)
             if cached is not None:
+                logger.info("[MasterFileCache] Blob hit: %s/%s", self.CONTAINER, blob_path)
                 return cached
 
+            logger.info("[MasterFileCache] Blob miss: downloading %s from %s", filename, download_url)
             resp = requests.get(download_url, timeout=30)
             resp.raise_for_status()
             # Recreates the broker-master container if it is missing, then uploads the day's file.
             self._blob_sync.upload_content_with_fallback(self.CONTAINER, blob_path, resp.content)
+            logger.info("[MasterFileCache] Uploaded %s (%d bytes) to %s/%s", filename, len(resp.content), self.CONTAINER, blob_path)
             return resp.content
         except Exception:
             logger.exception("[MasterFileCache] Blob cache failed for %s; using direct download", filename)
@@ -234,6 +249,7 @@ class FyersSymbolMaster:
             content = MasterFileCache(self.LOCAL_DIR).get(f"{key}.csv", url)
             # Avoid DtypeWarning on large mixed-type CSVs by disabling low_memory
             self._cache[key] = pd.read_csv(io.BytesIO(content), header=None, low_memory=False)
+            logger.info("[FyersSymbolMaster] Loaded %s: %d rows", key, len(self._cache[key]))
         return self._cache[key]
 
     def validate_equity_symbol(self, symbol: str) -> bool:

@@ -126,7 +126,8 @@ class DailyScheduler:
     def run_backup(self) -> bool:
         """Zip the day's market-data container and send it to Telegram, once per trading day.
 
-        Returns True when the backup is done (now or earlier today) or not needed, False when it failed.
+        Returns True when the backup is done (now or earlier today) or not needed. Returns False when it
+        failed or was skipped because the TEST_MODE window is still open or was never initialized.
         """
         IST_TZ = pytz.timezone(MarketTimes.timezone())
         now = datetime.now(IST_TZ)
@@ -136,9 +137,13 @@ class DailyScheduler:
             return True
 
         if EnvConfig.test_mode():
-            if EnvConfig.get_test_mode_expiry() is None or EnvConfig.is_test_mode_active(now):
+            if EnvConfig.get_test_mode_expiry() is None:
+                # The window was never initialized in this process, so the backup cannot be scheduled.
+                logging.warning("[DailyScheduler] TEST_MODE window was not initialized; backup skipped")
+                return False
+            if EnvConfig.is_test_mode_active(now):
                 logging.info("[DailyScheduler] TEST_MODE window still open; backup waits until it ends")
-                return True
+                return False
             # The live-vs-test cache decision no longer applies once the window ends; never touch the live container.
             container = BlobUtils.test_mode_cache_blob()
         else:
@@ -286,7 +291,8 @@ class DailyScheduler:
             )
             candles = bdm.HistoryNormalizer.to_candles(broker_name, response)
             if not candles:
-                logging.warning(f"[DailyScheduler] {instrument.symbol} ({broker_name}) history response had no candles")
+                reason = bdm.fyers_error_text(response) or "no candles in response"
+                logging.warning(f"[DailyScheduler] {instrument.symbol} ({broker_name}) history fetch empty: {reason}")
                 return False
 
             candle_cache.clean_and_save_candles(
@@ -320,7 +326,8 @@ class DailyScheduler:
                 instrument.symbol, chain, source=broker_name, batch_second=batch_second
             )
             if not rows:
-                logging.warning(f"[DailyScheduler] {instrument.symbol} ({broker_name}) option chain had no rows to cache")
+                reason = bdm.fyers_error_text(chain) or "no rows in response"
+                logging.warning(f"[DailyScheduler] {instrument.symbol} ({broker_name}) option chain empty: {reason}")
                 return False
             logging.info(f"[DailyScheduler] {instrument.symbol} ({broker_name}) option chain cached ({rows} rows)")
             return True
