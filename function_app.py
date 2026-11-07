@@ -1,7 +1,7 @@
 import logging
 import fnmatch
 import math
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import azure.functions as func
 
@@ -48,9 +48,16 @@ TEST_MODE_ONCE_CRON = "0 0 0 1 1 *"
 DAILY_JOB_CRON = TEST_MODE_ONCE_CRON if TEST_MODE else "0 0,10,20,30,40 3 * * 1-5"
 DAILY_JOB_TIME_BUDGET_SECONDS = float(EnvConfig.env("DAILY_JOB_TIME_BUDGET_SECONDS", "480") or "480")
 
+def _test_mode_backup_cron() -> str:
+    """One-shot NCRONTAB (UTC) for the minute after the TEST_MODE window ends."""
+    expiry = EnvConfig.get_test_mode_expiry()
+    if expiry is None:
+        return TEST_MODE_ONCE_CRON
+    fire_at = (expiry.astimezone(timezone.utc) + timedelta(minutes=1)).replace(second=0, microsecond=0)
+    return f"0 {fire_at.minute} {fire_at.hour} {fire_at.day} {fire_at.month} *"
+
 # 11:30 UTC = 17:00 IST, after market close; DailyScheduler.run_backup skips holidays and weekends itself.
-# In TEST_MODE it polls every minute; run_backup waits for the TEST_MODE window to end, then runs once per app start.
-BACKUP_JOB_CRON = "0 * * * * *" if TEST_MODE else "0 30 11 * * 1-5"
+BACKUP_JOB_CRON = _test_mode_backup_cron() if TEST_MODE else "0 30 11 * * 1-5"
 
 if ENABLE_BACKGROUND_TRIGGERS:
     @app.schedule(

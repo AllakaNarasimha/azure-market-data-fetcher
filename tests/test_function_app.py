@@ -1124,7 +1124,7 @@ def test_live_backup_has_three_attempt_slots(monkeypatch):
     functions = {function.get_function_name(): function for function in fa.app.get_functions()}
     binding = functions["daily_market_backup"].get_bindings_dict()["bindings"][0]
 
-    assert binding["schedule"] == "0 30-32 11 * * 1-5"
+    assert binding["schedule"] == "0 30 11 * * 1-5"
     assert binding["runOnStartup"] is False
     assert fa.DYNAMIC_OPTION_CHAIN_CRON.split()[2] == "3-10"
 
