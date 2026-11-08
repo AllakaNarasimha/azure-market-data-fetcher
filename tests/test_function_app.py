@@ -1102,11 +1102,16 @@ def test_backup_stops_after_three_failures_or_success_despite_restart_and_deleti
     monkeypatch.setattr(daily_progress_module.BlobUtils, "get_container_client", staticmethod(get_container))
 
     for restart in range(5):
-        monkeypatch.setattr(EnvConfig, "_TEST_MODE_START", fixed_now - timedelta(minutes=10, seconds=restart))
+        monkeypatch.setattr(EnvConfig, "_TEST_MODE_EXPIRY", fixed_now - timedelta(minutes=1) + timedelta(seconds=restart))
         daily_scheduler_module.DailyScheduler().run_backup()
 
-    assert calls.count("backup") == (1 if backup_succeeds else 3)
-    assert calls.count("delete") == (min(delete_failures + 1, 3) if backup_succeeds else 0)
+    if test_mode:
+        # Each test-mode start opens a new window and backs up again.
+        assert calls.count("backup") == 5
+        assert (calls.count("delete") >= 1) == backup_succeeds
+    else:
+        assert calls.count("backup") == (1 if backup_succeeds else 3)
+        assert calls.count("delete") == (min(delete_failures + 1, 3) if backup_succeeds else 0)
     assert "scheduler-state" in containers
     if backup_succeeds and delete_failures < 3:
         assert "test-cache" not in containers

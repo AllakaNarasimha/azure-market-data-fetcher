@@ -154,8 +154,12 @@ class DailyScheduler:
         else:
             container = BlobUtils.market_data_cache_blob()
 
-        mode = "test" if EnvConfig.test_mode() else "live"
-        progress = DailyProgress(f"{now:%Y-%m-%d}_{mode}_backup", container="scheduler-state", strict=True)
+        if EnvConfig.test_mode():
+            # Each test-mode start opens a new window, so it gets its own run key and backs up again.
+            run_key = f"{now:%Y-%m-%d}_test_{EnvConfig.get_test_mode_expiry():%Y%m%dT%H%M%S}_backup"
+        else:
+            run_key = f"{now:%Y-%m-%d}_live_backup"
+        progress = DailyProgress(run_key, container="scheduler-state", strict=True)
         task = f"backup:{container}"
         delete_task = f"delete:{container}"
         if progress.is_finished(task):
