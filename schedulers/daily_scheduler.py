@@ -64,7 +64,7 @@ class DailyScheduler:
         if EnvConfig.test_mode() and not EnvConfig.is_test_mode_active(now):
             logging.info("[DailyScheduler] TEST_MODE window ended. Skipping daily job.")
             return True
-        if MarketCalendar.is_holiday(now):
+        if not EnvConfig.test_mode() and MarketCalendar.is_holiday(now):
             logging.info("Market holiday. Skipping daily job.")
             # Still prune old broker-master folders even when the rest of the job is skipped
             bdm.MasterFileCache.cleanup_old_dated_folders()
