@@ -187,13 +187,16 @@ class DailyScheduler:
         return success
 
     def _delete_backed_up_container(self, progress, delete_task: str, container: str, result) -> None:
-        """Delete the backed-up container once; only runs right after a backup made in this attempt."""
-        if result is None:
+        """Delete the backed-up container once. A restart (result None) may delete only in TEST_MODE."""
+        if result is None and not EnvConfig.test_mode():
             logging.info("[DailyScheduler] Container deletion skipped: no backup in this run; container=%s", container)
             return
+        backup_service = MarketDataBackupService(container_name=container)
         if progress.is_finished(delete_task):
-            logging.info("[DailyScheduler] Container already deleted; container=%s", container)
-            return
+            if not backup_service.source_container_exists():
+                logging.info("[DailyScheduler] Container already deleted; container=%s", container)
+                return
+            logging.warning("[DailyScheduler] Container exists again after an earlier deletion; deleting again; container=%s", container)
         if not EnvConfig.delete_after_backup():
             logging.info("[DailyScheduler] Container deletion skipped: DELETE_AFTER_BACKUP=false; container=%s", container)
             return
@@ -201,7 +204,6 @@ class DailyScheduler:
             logging.warning("[DailyScheduler] DELETE_AFTER_BACKUP ignored on a local run; container %s kept", container)
             return
 
-        backup_service = MarketDataBackupService(container_name=container)
         logging.info("[DailyScheduler] Deleting backed-up container: DELETE_AFTER_BACKUP=true; container=%s", container)
         for attempt in range(1, progress.MAX_ATTEMPTS + 1):
             try:

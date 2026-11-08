@@ -1085,6 +1085,9 @@ def test_backup_stops_after_three_failures_or_success_despite_restart_and_deleti
             containers.pop("test-cache", None)
             return True
 
+        def source_container_exists(self):
+            return "test-cache" in containers
+
         def notify_container_deleted(self, result):
             return 2
 

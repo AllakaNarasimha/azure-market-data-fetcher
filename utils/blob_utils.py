@@ -462,6 +462,10 @@ class BlobSync:
         logger.info("[BLOB SYNC] Deleted container '%s'", container_name)
         return True
 
+    def container_exists(self, container_name: str) -> bool:
+        container_client = self.get_container(container_name)
+        return bool(container_client and container_client.exists())
+
     def _require_container(self, container_name: str) -> ContainerClient:
         container_client = self.get_container(container_name)
         if not container_client:
