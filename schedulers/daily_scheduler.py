@@ -187,7 +187,10 @@ class DailyScheduler:
         return success
 
     def _delete_backed_up_container(self, progress, delete_task: str, container: str, result) -> None:
-        """Delete the backed-up container once; `result` is None when the backup ran in an earlier attempt."""
+        """Delete the backed-up container once; only runs right after a backup made in this attempt."""
+        if result is None:
+            logging.info("[DailyScheduler] Container deletion skipped: no backup in this run; container=%s", container)
+            return
         if progress.is_finished(delete_task):
             logging.info("[DailyScheduler] Container already deleted; container=%s", container)
             return
