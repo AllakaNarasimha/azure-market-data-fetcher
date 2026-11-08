@@ -157,9 +157,13 @@ class DailyScheduler:
         mode = "test" if EnvConfig.test_mode() else "live"
         progress = DailyProgress(f"{now:%Y-%m-%d}_{mode}_backup", container="scheduler-state", strict=True)
         task = f"backup:{container}"
+        delete_task = f"delete:{container}"
         if progress.is_finished(task):
-            logging.info("[DailyScheduler] Backup already handled for %s; nothing to do", progress.run_key)
-            return progress.tasks.get(task) == STATUS_DONE
+            logging.info("[DailyScheduler] Backup already handled for %s; checking deletion only", progress.run_key)
+            success = progress.tasks.get(task) == STATUS_DONE
+            if success:
+                self._delete_backed_up_container(progress, delete_task, container, result=None)
+            return success
 
         progress.record(task, False)
         try:
@@ -175,37 +179,46 @@ class DailyScheduler:
             success = False
         if success:
             progress.record(task, True)
-
-        if not success:
+            self._delete_backed_up_container(progress, delete_task, container, result=result)
+        else:
             logging.info("[DailyScheduler] Container deletion skipped: backup failed; container=%s", container)
             if progress.is_finished(task):
                 logging.error("[DailyScheduler] Backup stopped after %d attempts; container=%s", progress.MAX_ATTEMPTS, container)
-        elif not EnvConfig.delete_after_backup():
-            logging.info("[DailyScheduler] Container deletion skipped: DELETE_AFTER_BACKUP=false; container=%s", container)
-        else:
-            if BlobUtils.is_running_locally():
-                logging.warning("[DailyScheduler] DELETE_AFTER_BACKUP ignored on a local run; container %s kept", container)
-            else:
-                logging.info("[DailyScheduler] Deleting backed-up container: DELETE_AFTER_BACKUP=true; container=%s", container)
-                for attempt in range(1, progress.MAX_ATTEMPTS + 1):
-                    try:
-                        deleted = backup_service.delete_source_container()
-                    except Exception:
-                        logging.exception("[DailyScheduler] Container deletion attempt %d failed; container=%s", attempt, container)
-                        deleted = False
-                    if deleted:
-                        try:
-                            message_id = backup_service.notify_container_deleted(result)
-                            logging.info(
-                                "[DailyScheduler] Container deletion notification sent: container=%s telegram_message_id=%d",
-                                container, message_id,
-                            )
-                        except Exception:
-                            logging.exception("[DailyScheduler] Container %s deleted but Telegram notification failed", container)
-                        break
-                else:
-                    logging.error("[DailyScheduler] Container deletion stopped after %d attempts; container=%s", progress.MAX_ATTEMPTS, container)
         return success
+
+    def _delete_backed_up_container(self, progress, delete_task: str, container: str, result) -> None:
+        """Delete the backed-up container once; `result` is None when the backup ran in an earlier attempt."""
+        if progress.is_finished(delete_task):
+            logging.info("[DailyScheduler] Container already deleted; container=%s", container)
+            return
+        if not EnvConfig.delete_after_backup():
+            logging.info("[DailyScheduler] Container deletion skipped: DELETE_AFTER_BACKUP=false; container=%s", container)
+            return
+        if BlobUtils.is_running_locally():
+            logging.warning("[DailyScheduler] DELETE_AFTER_BACKUP ignored on a local run; container %s kept", container)
+            return
+
+        backup_service = MarketDataBackupService(container_name=container)
+        logging.info("[DailyScheduler] Deleting backed-up container: DELETE_AFTER_BACKUP=true; container=%s", container)
+        for attempt in range(1, progress.MAX_ATTEMPTS + 1):
+            try:
+                deleted = backup_service.delete_source_container()
+            except Exception:
+                logging.exception("[DailyScheduler] Container deletion attempt %d failed; container=%s", attempt, container)
+                deleted = False
+            if deleted:
+                progress.record(delete_task, True)
+                if result is not None:
+                    try:
+                        message_id = backup_service.notify_container_deleted(result)
+                        logging.info(
+                            "[DailyScheduler] Container deletion notification sent: container=%s telegram_message_id=%d",
+                            container, message_id,
+                        )
+                    except Exception:
+                        logging.exception("[DailyScheduler] Container %s deleted but Telegram notification failed", container)
+                return
+        logging.error("[DailyScheduler] Container deletion stopped after %d attempts; container=%s", progress.MAX_ATTEMPTS, container)
 
     def _run_task(self, progress, task: str, label: str, symbol: str, work) -> bool | None:
         """Run one symbol's work. Returns None when the time budget is used up (caller must stop).
