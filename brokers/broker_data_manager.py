@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import io
 import logging
 import time
@@ -49,6 +50,33 @@ def fyers_error_text(response) -> str:
         return ""
     code, message = error
     return f"code={code} message={message!r}"
+
+
+def _log_fyers_reply(what: str, target: str, response) -> None:
+    error = _fyers_error(response)
+    if error is None:
+        logger.info("Fyers %s ok for %s", what, target)
+        return
+    code, message = error
+    logger.warning("Fyers %s failed for %s: code=%s message=%r", what, target, code, message)
+
+
+def _log_broker_call(broker: str):
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(self, *args, **kwargs):
+            try:
+                result = fn(self, *args, **kwargs)
+            except Exception:
+                logger.exception("[%s] %s failed", broker, fn.__name__)
+                raise
+            if isinstance(result, dict) and str(result.get("status", "")).lower() == "failure":
+                logger.warning("[%s] %s returned failure: %s", broker, fn.__name__, result.get("remarks"))
+            return result
+
+        return wrapper
+
+    return decorator
 
 
 def _is_rate_limited(code, message: str) -> bool:
@@ -173,9 +201,15 @@ class DhanSecurityMaster:
 
     def _load(self, date: str) -> pd.DataFrame:
         if date not in self._cache:
-            content = MasterFileCache(self.LOCAL_DIR).get(f"master_{date}.csv", self.BASE_URL)
-            # Avoid DtypeWarning on large mixed-type CSVs by disabling low_memory
-            self._cache[date] = pd.read_csv(io.BytesIO(content), low_memory=False)
+            logger.info("[DhanSecurityMaster] Loading master_%s.csv", date)
+            try:
+                content = MasterFileCache(self.LOCAL_DIR).get(f"master_{date}.csv", self.BASE_URL)
+                # Avoid DtypeWarning on large mixed-type CSVs by disabling low_memory
+                self._cache[date] = pd.read_csv(io.BytesIO(content), low_memory=False)
+            except Exception:
+                logger.exception("[DhanSecurityMaster] Failed to load master_%s.csv", date)
+                raise
+            logger.info("[DhanSecurityMaster] Loaded master_%s.csv: %d rows", date, len(self._cache[date]))
         return self._cache[date]
 
     def get_security_id(
@@ -246,9 +280,14 @@ class FyersSymbolMaster:
     def _load(self, url: str, name: str, date: str) -> pd.DataFrame:
         key = f"{name}_{date}"
         if key not in self._cache:
-            content = MasterFileCache(self.LOCAL_DIR).get(f"{key}.csv", url)
-            # Avoid DtypeWarning on large mixed-type CSVs by disabling low_memory
-            self._cache[key] = pd.read_csv(io.BytesIO(content), header=None, low_memory=False)
+            logger.info("[FyersSymbolMaster] Loading %s from %s", key, url)
+            try:
+                content = MasterFileCache(self.LOCAL_DIR).get(f"{key}.csv", url)
+                # Avoid DtypeWarning on large mixed-type CSVs by disabling low_memory
+                self._cache[key] = pd.read_csv(io.BytesIO(content), header=None, low_memory=False)
+            except Exception:
+                logger.exception("[FyersSymbolMaster] Failed to load %s", key)
+                raise
             logger.info("[FyersSymbolMaster] Loaded %s: %d rows", key, len(self._cache[key]))
         return self._cache[key]
 
@@ -486,16 +525,19 @@ class DhanDataManager(IDataManager):
             raise ValueError("Dhan requires Instrument.security_id")
         return instrument.security_id
 
+    @_log_broker_call("Dhan")
     def get_price(self, instrument: Instrument) -> dict:
         sec_id = self._security_id(instrument)
         return self._get_client().quote_data({instrument.exchange_segment: [sec_id]})
 
+    @_log_broker_call("Dhan")
     def get_quotes(self, instruments: list[Instrument]) -> list[dict]:
         by_segment: dict[str, list[int]] = {}
         for inst in instruments:
             by_segment.setdefault(inst.exchange_segment, []).append(self._security_id(inst))
         return self._get_client().quote_data(by_segment)
 
+    @_log_broker_call("Dhan")
     def get_historical_data(
         self, instrument: Instrument, period: str, otype: str, start: int, end: int
     ) -> list[tuple]:
@@ -519,6 +561,7 @@ class DhanDataManager(IDataManager):
             to_date=str(end),
         )
 
+    @_log_broker_call("Dhan")
     def get_option_chain(
         self,
         instrument: Instrument,
@@ -537,6 +580,7 @@ class DhanDataManager(IDataManager):
             under_security_id=sec_id, under_exchange_segment="NSE_FNO", expiry=expiries or ""
         )
 
+    @_log_broker_call("Dhan")
     def get_expiry_dates(self, instrument: Instrument) -> list[str]:
         """Raw expiry date strings for the underlying (Dhan has no weekly/monthly flag)."""
         sec_id = self._security_id(instrument)
@@ -564,6 +608,7 @@ class FyersDataManager(IDataManager):
             response = self._get_client().optionchain(params)
             error = _fyers_error(response)
             if error is None:
+                logger.info("Fyers option chain ok for %s", params.get("symbol"))
                 return response
             code, message = error
             if attempt < self.OPTION_CHAIN_ATTEMPTS and _is_rate_limited(code, message):
@@ -576,17 +621,24 @@ class FyersDataManager(IDataManager):
             raise FyersApiError(f"{what} for {params.get('symbol')}", code, message)
         raise AssertionError("unreachable")
 
+    @_log_broker_call("Fyers")
     def get_price(self, instrument: Instrument) -> dict:
-        return self._get_client().quotes({"symbols": instrument.symbol})
+        response = self._get_client().quotes({"symbols": instrument.symbol})
+        _log_fyers_reply("quotes", instrument.symbol, response)
+        return response
 
+    @_log_broker_call("Fyers")
     def get_quotes(self, instruments: list[Instrument]) -> list[dict]:
         symbols = ",".join(inst.symbol for inst in instruments)
-        return self._get_client().quotes({"symbols": symbols})
+        response = self._get_client().quotes({"symbols": symbols})
+        _log_fyers_reply("quotes", f"{len(instruments)} symbols", response)
+        return response
 
+    @_log_broker_call("Fyers")
     def get_historical_data(
         self, instrument: Instrument, period: str, otype: str, start: int, end: int
     ) -> list[tuple]:
-        return self._get_client().history(
+        response = self._get_client().history(
             {
                 "symbol": instrument.symbol,
                 "resolution": period,
@@ -596,7 +648,10 @@ class FyersDataManager(IDataManager):
                 "cont_flag": "1",
             }
         )
+        _log_fyers_reply(f"history ({period})", instrument.symbol, response)
+        return response
 
+    @_log_broker_call("Fyers")
     def get_option_chain(
         self,
         instrument: Instrument,
@@ -614,6 +669,7 @@ class FyersDataManager(IDataManager):
             {"symbol": instrument.symbol, "strikecount": strikecount, "timestamp": timestamp}, "option chain"
         )
 
+    @_log_broker_call("Fyers")
     def get_expiries(self, instrument: Instrument) -> list[dict]:
         """Available expiries for the underlying: [{date, expiry (epoch str), expiry_flag}, ...], nearest first."""
         chain = self._optionchain({"symbol": instrument.symbol, "strikecount": 1, "timestamp": ""}, "expiry list")

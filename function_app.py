@@ -21,6 +21,7 @@ from app_settings import (
 )
 
 app = func.FunctionApp()
+logging.info("Function app started; TEST_MODE=%s", TEST_MODE)
 
 @app.route(
     route="health",
@@ -28,6 +29,7 @@ app = func.FunctionApp()
     auth_level=func.AuthLevel.ANONYMOUS
 )
 def health(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("[health] called: %s %s", req.method, req.url)
     return func.HttpResponse(
         body='{"status":"ok","service":"market-data-func"}',
         status_code=200,
@@ -67,6 +69,7 @@ if ENABLE_BACKGROUND_TRIGGERS:
         use_monitor=False,
     )
     def daily_job(dailyTimer: func.TimerRequest) -> None:
+        logging.info("[daily_job] triggered")
         try:
             complete = DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run(
                 time_budget_seconds=DAILY_JOB_TIME_BUDGET_SECONDS
@@ -82,6 +85,7 @@ if ENABLE_BACKGROUND_TRIGGERS:
         use_monitor=True,
     )
     def daily_market_backup(backupTimer: func.TimerRequest) -> None:
+        logging.info("[daily_market_backup] triggered")
         try:
             ok = DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run_backup()
             logging.info(f"[daily_market_backup] finished; backup ok: {ok}")
@@ -98,6 +102,7 @@ if ENABLE_BACKGROUND_TRIGGERS:
             use_monitor=False,
         )
         def option_chain_fetcher(chainTimer: func.TimerRequest) -> None:
+            logging.info("[option_chain_fetcher] triggered")
             if TEST_MODE:
                 # One-shot run: fetch every batch once instead of only the batch for the current second.
                 target_seconds = list(range(math.ceil(len(OPTION_CHAIN_SYMBOLS) / PARALLEL_BATCH_SIZE)))
