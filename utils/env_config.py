@@ -44,6 +44,11 @@ class EnvConfig:
         return (cls.env("TEST_MODE", "false") or "").strip().lower() == "true"
 
     @classmethod
+    def run_on_market_hours(cls) -> bool:
+        """When True (default), TEST_MODE behaves like prod on trading days (env `RUN_ON_MARKET_HOURS`)."""
+        return (cls.env("RUN_ON_MARKET_HOURS", "true") or "true").strip().lower() != "false"
+
+    @classmethod
     def test_mode_minutes(cls) -> int:
         raw = cls.env("TEST_MODE_MINUTES", "5") or "5"
         try:
@@ -77,6 +82,13 @@ class EnvConfig:
     @classmethod
     def environment(cls) -> str:
         return cls.env("ENVIRONMENT", "prod") or "prod"
+
+    @classmethod
+    def source_label(cls) -> str:
+        """Human-readable origin of this app, e.g. 'prod', 'dev-test (market-data-func)'."""
+        label = cls.environment() + ("-test" if cls.test_mode() else "")
+        site = cls.website_site_name()
+        return f"{label} ({site})" if site else label
 
     @classmethod
     def market_storage_connection(cls) -> Optional[str]:

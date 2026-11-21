@@ -93,5 +93,9 @@ class DailyProgress:
             self.tasks[task] = (previous if isinstance(previous, int) else 0) + 1
         self.save()
 
+    def note(self, task: str, value: str) -> None:
+        """Attach a text note to the day's record; saved with the next record()."""
+        self.tasks[task] = value
+
     def pending(self, tasks: list[str]) -> list[str]:
         return [task for task in tasks if not self.is_finished(task)]

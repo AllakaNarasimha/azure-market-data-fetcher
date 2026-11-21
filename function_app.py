@@ -13,6 +13,7 @@ from schedulers.daily_scheduler import DailyScheduler
 from app_settings import (
     IST_TZ,
     TEST_MODE,
+    USE_PROD_SCHEDULE,
     OPTION_CHAIN_SYMBOLS,
     HISTORY_DAYS,
     HISTORY_INTERVAL,
@@ -38,16 +39,20 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
 
 ENABLE_BACKGROUND_TRIGGERS = True
 
-# In TEST_MODE the option-chain job runs once per app start (run_on_startup) and not on a recurring schedule.
-# This cron only fires on Jan 1st, so it never triggers during a test session.
+# With RUN_ON_MARKET_HOURS (default) the normal schedule stays active in TEST_MODE; each run decides at run time
+# whether it is a trading day (prod behaviour) or not (test behaviour, only inside the startup window).
+# Without it, TEST_MODE runs once per app start: this cron only fires on Jan 1st.
 TEST_MODE_ONCE_CRON = "0 0 0 1 1 *"
+
+# True when TEST_MODE is on but the prod schedule stays active (RUN_ON_MARKET_HOURS).
+TEST_MODE_WITH_PROD_SCHEDULE = TEST_MODE and USE_PROD_SCHEDULE
 
 # History doesn't need a live session, so the daily job runs pre-market (08:30-09:10 IST = 03:00-03:40 UTC),
 # well before the 09:15 IST open, so LiveScheduler never contends with it for broker calls once trading starts.
 # One run is normally enough; the 10-minute poll inside this window only exists so a slow first attempt can
 # resume (progress is recorded per symbol) instead of leaving the day's data half-fetched.
-# In TEST_MODE the job runs once per app start (run_on_startup), same as option_chain_fetcher.
-DAILY_JOB_CRON = TEST_MODE_ONCE_CRON if TEST_MODE else "0 0,10,20,30,40 3 * * 1-5"
+# In TEST_MODE the job also runs once per app start (run_on_startup).
+DAILY_JOB_CRON = "0 0,10,20,30,40 3 * * 1-5" if USE_PROD_SCHEDULE else TEST_MODE_ONCE_CRON
 DAILY_JOB_TIME_BUDGET_SECONDS = float(EnvConfig.env("DAILY_JOB_TIME_BUDGET_SECONDS", "480") or "480")
 
 def _test_mode_backup_cron() -> str:
@@ -59,7 +64,7 @@ def _test_mode_backup_cron() -> str:
     return f"0 {fire_at.minute} {fire_at.hour} {fire_at.day} {fire_at.month} *"
 
 # 11:30 UTC = 17:00 IST, after market close; DailyScheduler.run_backup skips holidays and weekends itself.
-BACKUP_JOB_CRON = _test_mode_backup_cron() if TEST_MODE else "0 30 11 * * 1-5"
+BACKUP_JOB_CRON = "0 30 11 * * 1-5" if USE_PROD_SCHEDULE else _test_mode_backup_cron()
 
 if ENABLE_BACKGROUND_TRIGGERS:
     @app.schedule(
@@ -87,23 +92,41 @@ if ENABLE_BACKGROUND_TRIGGERS:
     def daily_market_backup(backupTimer: func.TimerRequest) -> None:
         logging.info("[daily_market_backup] triggered")
         try:
-            ok = DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run_backup()
+            ok = DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run_backup(
+                only="live" if TEST_MODE_WITH_PROD_SCHEDULE else None
+            )
             logging.info(f"[daily_market_backup] finished; backup ok: {ok}")
         except Exception as ex:
             logging.exception(f"[daily_market_backup] DailyScheduler.run_backup() failed: {ex!r}")
+
+    if TEST_MODE_WITH_PROD_SCHEDULE:
+        # The live backup above skips test-mode runs, so a startup on a non-trading day still gets its test backup.
+        @app.timer_trigger(
+            schedule=_test_mode_backup_cron(),
+            arg_name="testBackupTimer",
+            run_on_startup=False,
+            use_monitor=True,
+        )
+        def test_mode_backup(testBackupTimer: func.TimerRequest) -> None:
+            logging.info("[test_mode_backup] triggered")
+            try:
+                ok = DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run_backup(only="test")
+                logging.info(f"[test_mode_backup] finished; backup ok: {ok}")
+            except Exception as ex:
+                logging.exception(f"[test_mode_backup] DailyScheduler.run_backup() failed: {ex!r}")
 
 
 if ENABLE_BACKGROUND_TRIGGERS:
     if DYNAMIC_OPTION_CHAIN_CRON:
         @app.schedule(
-            schedule=TEST_MODE_ONCE_CRON if TEST_MODE else DYNAMIC_OPTION_CHAIN_CRON,
+            schedule=DYNAMIC_OPTION_CHAIN_CRON if USE_PROD_SCHEDULE else TEST_MODE_ONCE_CRON,
             arg_name="chainTimer",
             run_on_startup=TEST_MODE,
             use_monitor=False,
         )
         def option_chain_fetcher(chainTimer: func.TimerRequest) -> None:
             logging.info("[option_chain_fetcher] triggered")
-            if TEST_MODE:
+            if TEST_MODE and not USE_PROD_SCHEDULE:
                 # One-shot run: fetch every batch once instead of only the batch for the current second.
                 target_seconds = list(range(math.ceil(len(OPTION_CHAIN_SYMBOLS) / PARALLEL_BATCH_SIZE)))
             else:

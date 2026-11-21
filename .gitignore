@@ -58,9 +58,6 @@ summary_oi_data.py
 .git/
 .github/
 
-# Tests
-tests/
-
 # Build / packaging
 coverage/
 dist/
