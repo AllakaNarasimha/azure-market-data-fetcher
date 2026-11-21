@@ -74,7 +74,11 @@ class DailyProgress:
                 return
             blob = self._blob()
             if blob:
-                blob.upload_blob(payload.encode(), overwrite=True)
+                try:
+                    blob.upload_blob(payload.encode(), overwrite=True)
+                except ResourceNotFoundError:
+                    BlobUtils.create_missing_container(self._container_client)
+                    blob.upload_blob(payload.encode(), overwrite=True)
         except Exception:
             if self._strict:
                 raise
@@ -92,6 +96,10 @@ class DailyProgress:
             previous = self.tasks.get(task)
             self.tasks[task] = (previous if isinstance(previous, int) else 0) + 1
         self.save()
+
+    def note(self, task: str, value: str) -> None:
+        """Attach a text note to the day's record; saved with the next record()."""
+        self.tasks[task] = value
 
     def pending(self, tasks: list[str]) -> list[str]:
         return [task for task in tasks if not self.is_finished(task)]

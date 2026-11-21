@@ -42,21 +42,28 @@ class BlobUtils:
         return EnvConfig.test_mode_cache_blob()
 
     @staticmethod
-    def ensure_container(container_name: str) -> None:
-        conn_str = EnvConfig.market_storage_connection()
-        if not conn_str:
-            return
-        container_client = BlobServiceClient.from_connection_string(conn_str).get_container_client(container_name)
-        if container_client.exists():
-            logger.info("Container '%s' found", container_name)
-            return
+    def create_missing_container(container_client: ContainerClient) -> None:
+        """Create the container; a concurrent creator winning the race is fine."""
         try:
             container_client.create_container()
-            logger.info("Container '%s' not found; created", container_name)
+            logger.info("Container '%s' was missing; created", container_client.container_name)
         except ResourceExistsError:
             pass
-        except Exception:
-            logger.exception("Failed to create container '%s'", container_name)
+
+    @staticmethod
+    def upload_creating_container(container_client: ContainerClient, blob_name: str, data: Any, **kwargs: Any) -> None:
+        """Upload `data`; if the container is missing, create it and retry once.
+
+        Containers are created only here, when something is first saved, so reads and start-up never leave empty ones.
+        """
+        blob = container_client.get_blob_client(blob_name)
+        try:
+            blob.upload_blob(data, **kwargs)
+        except ResourceNotFoundError:
+            BlobUtils.create_missing_container(container_client)
+            if hasattr(data, "seek"):
+                data.seek(0)
+            blob.upload_blob(data, **kwargs)
 
     @staticmethod
     def is_running_locally() -> bool:
@@ -74,44 +81,13 @@ class BlobUtils:
     def environment() -> str:
         return EnvConfig.environment()
 
-
-    # Containers already created/confirmed in this process, so repeated clients don't re-send create requests.
-    _ensured_containers: set[tuple[str, str]] = set()
-    _ensured_lock = threading.Lock()
-
     @staticmethod
     def get_container_client(container_name: str, connection_string: Optional[str] = None) -> Optional[ContainerClient]:
+        """Return a client without creating the container; writers create it via `upload_creating_container`."""
         conn_str = connection_string or EnvConfig.market_storage_connection()
         if not conn_str:
             return None
-
-        blob_service = BlobServiceClient.from_connection_string(conn_str)
-        container_client = blob_service.get_container_client(container_name)
-        key = (conn_str, container_name)
-        with BlobUtils._ensured_lock:
-            if key in BlobUtils._ensured_containers:
-                return container_client
-        try:
-            container_client.create_container()
-            created = True
-        except ResourceExistsError:
-            created = True
-        except Exception:
-            logger.exception("Failed to create blob container '%s'", container_name)
-            created = False
-        if created:
-            with BlobUtils._ensured_lock:
-                BlobUtils._ensured_containers.add(key)
-        return container_client
-
-    @staticmethod
-    def forget_container(container_name: str, connection_string: Optional[str] = None) -> None:
-        """Drop the "already created" memo so the next get_container_client recreates a deleted container."""
-        conn_str = connection_string or EnvConfig.market_storage_connection()
-        if not conn_str:
-            return
-        with BlobUtils._ensured_lock:
-            BlobUtils._ensured_containers.discard((conn_str, container_name))
+        return BlobServiceClient.from_connection_string(conn_str).get_container_client(container_name)
 
     @staticmethod
     def get_blob_connection_string() -> Optional[str]:
@@ -145,7 +121,6 @@ class BlobSync:
         self._test_container_client = None
         if self.is_running_live:
             self._container_client = self.get_container(BlobUtils.market_data_cache_blob())
-            # Only create the test-mode container when TEST_MODE is actually enabled
             if EnvConfig.test_mode():
                 self._test_container_client = self.get_container(BlobUtils.test_mode_cache_blob())
             if not self._container_client:
@@ -262,26 +237,13 @@ class BlobSync:
             try:
                 exists = blob.exists()
             except ResourceNotFoundError:
-                self._recreate_container(container_client, blob_name)
-                return
+                return  # container missing: nothing to download, and reading must not create it
             if exists:
                 os.makedirs(os.path.dirname(local_path), exist_ok=True)
                 with open(local_path, "wb") as f:
                     f.write(blob.download_blob().readall())
         except Exception:
             logger.exception("[BLOB SYNC] Failed to download %s", blob_name)
-
-    def _recreate_container(self, container_client, blob_name: str) -> bool:
-        """Container was missing at upload/download time; recreate it so the next call can succeed."""
-        try:
-            container_client.create_container()
-        except ResourceExistsError:
-            pass
-        except Exception:
-            logger.exception("[BLOB SYNC] Failed to recreate missing container for %s", blob_name)
-            return False
-        logger.warning("[BLOB SYNC] Container was missing for %s; recreated it", blob_name)
-        return True
 
     def upload(self, local_path: str, blob_name: str, container_name: str | None = None) -> None:
         # Skip when running locally
@@ -298,14 +260,8 @@ class BlobSync:
                 self._upload_parquet_via_data_lake(resolved_container_name, blob_name, local_path)
                 return
 
-            blob = container_client.get_blob_client(blob_name)
-            try:
-                with open(local_path, "rb") as f:
-                    blob.upload_blob(f.read(), overwrite=True)
-            except ResourceNotFoundError:
-                if self._recreate_container(container_client, blob_name):
-                    with open(local_path, "rb") as f:
-                        blob.upload_blob(f.read(), overwrite=True)
+            with open(local_path, "rb") as f:
+                BlobUtils.upload_creating_container(container_client, blob_name, f.read(), overwrite=True)
         except Exception:
             logger.exception("[BLOB SYNC] Failed to upload %s", blob_name)
             if self._is_parquet_path(local_path) and self._is_parquet_path(blob_name) and self._delta_lake_enabled():
@@ -359,15 +315,9 @@ class BlobSync:
         blob_name = self._resolve_blob_name(blob_name, is_test, local_path=blob_name)
 
         try:
-            blob = container_client.get_blob_client(blob_name)
-            blob.upload_blob(data, overwrite=overwrite)
+            BlobUtils.upload_creating_container(container_client, blob_name, data, overwrite=overwrite)
             logger.info("[BLOB SYNC] Uploaded content to %s/%s", container_name, blob_name)
             return True
-        except ResourceNotFoundError:
-            # Container was deleted after this process confirmed it; forget that so the next client recreates it.
-            BlobUtils.forget_container(container_name, self._connection_string)
-            logger.exception("[BLOB SYNC] Failed to upload content to %s/%s", container_name, blob_name)
-            return False
         except Exception:
             logger.exception("[BLOB SYNC] Failed to upload content to %s/%s", container_name, blob_name)
             return False
@@ -394,7 +344,7 @@ class BlobSync:
             container_client = BlobUtils.get_container_client(container_name, self._connection_string)
             if not container_client:
                 raise RuntimeError(f"Upload of '{blob_name}' to container '{container_name}' failed: no container client")
-            container_client.get_blob_client(blob_name).upload_blob(data, overwrite=overwrite)
+            BlobUtils.upload_creating_container(container_client, blob_name, data, overwrite=overwrite)
             logger.info("[BLOB SYNC] Uploaded content via fallback to %s/%s", container_name, blob_name)
         except Exception:
             logger.exception("[BLOB SYNC] Fallback upload failed for %s/%s", container_name, blob_name)
@@ -419,7 +369,7 @@ class BlobSync:
             account_name=account_name, container=container_name,
             prefix=prefix, account_key=account_key,
         ) as lake:
-            yield lake
+            yield _CreateOnWriteLake(lake, lambda: self._create_container_if_missing(container_name))
 
     @contextmanager
     def open_parquet(self, local_path: str, container_name: str | None = None) -> Iterator[Any]:
@@ -456,15 +406,15 @@ class BlobSync:
         except Exception:
             logger.exception("[BLOB SYNC] Failed to delete container '%s'", container_name)
             return False
-        # Drop cached clients so the next writer recreates the container.
         self._containers.pop(container_name, None)
-        BlobUtils.forget_container(container_name, self._connection_string)
         logger.info("[BLOB SYNC] Deleted container '%s'", container_name)
         return True
 
     def container_exists(self, container_name: str) -> bool:
-        container_client = self.get_container(container_name)
-        return bool(container_client and container_client.exists())
+        conn_str = self._connection_string or EnvConfig.market_storage_connection()
+        if not conn_str:
+            return False
+        return BlobServiceClient.from_connection_string(conn_str).get_container_client(container_name).exists()
 
     def _require_container(self, container_name: str) -> ContainerClient:
         container_client = self.get_container(container_name)
@@ -472,8 +422,20 @@ class BlobSync:
             raise RuntimeError(f"No storage connection; cannot access container '{container_name}'")
         return container_client
 
+    @staticmethod
+    def _is_container_missing(error: ResourceNotFoundError) -> bool:
+        return getattr(error, "error_code", None) == "ContainerNotFound"
+
+    def _create_container_if_missing(self, container_name: str) -> bool:
+        """Create the container if it does not exist. Returns True when it had to be created."""
+        container_client = self.get_container(container_name)
+        if not container_client or container_client.exists():
+            return False
+        BlobUtils.create_missing_container(container_client)
+        return True
+
     def read_content(self, container_name: str, blob_name: str) -> bytes:
-        """Download a blob's bytes. Raises ResourceNotFoundError when the blob is missing."""
+        """Download a blob's bytes. Raises ResourceNotFoundError when the blob or its container is missing."""
         return self._require_container(container_name).get_blob_client(blob_name).download_blob().readall()
 
     def read_if_exists(self, container_name: str, blob_name: str) -> Optional[bytes]:
@@ -483,12 +445,48 @@ class BlobSync:
             return None
 
     def list_blobs(self, container_name: str, prefix: str = "") -> list:
-        return list(self._require_container(container_name).list_blobs(name_starts_with=prefix or None))
+        """Blobs under `prefix`; a missing container has none (reading never creates it)."""
+        try:
+            return list(self._require_container(container_name).list_blobs(name_starts_with=prefix or None))
+        except ResourceNotFoundError as error:
+            if not self._is_container_missing(error):
+                raise
+            return []
 
     def list_prefixes(self, container_name: str, prefix: str = "") -> list[str]:
-        """Immediate virtual folders under `prefix`."""
-        blobs = self._require_container(container_name).walk_blobs(name_starts_with=prefix or None, delimiter="/")
-        return [item.name for item in blobs if isinstance(item, BlobPrefix)]
+        """Immediate virtual folders under `prefix`; empty when the container is missing."""
+        try:
+            blobs = self._require_container(container_name).walk_blobs(name_starts_with=prefix or None, delimiter="/")
+            return [item.name for item in blobs if isinstance(item, BlobPrefix)]
+        except ResourceNotFoundError as error:
+            if not self._is_container_missing(error):
+                raise
+            return []
+
+
+class _CreateOnWriteLake:
+    """Wraps a DataLake so its container is created only when a write finds it missing; reads never create it."""
+
+    def __init__(self, lake: Any, create_if_missing):
+        self._lake = lake
+        self._create_if_missing = create_if_missing
+
+    def _write(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return getattr(self._lake, method)(*args, **kwargs)
+        except Exception:
+            if not self._create_if_missing():
+                raise
+        return getattr(self._lake, method)(*args, **kwargs)
+
+    def write(self, *args: Any, **kwargs: Any) -> Any:
+        return self._write("write", *args, **kwargs)
+
+    def upsert(self, *args: Any, **kwargs: Any) -> Any:
+        return self._write("upsert", *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._lake, name)
 
 
 class _ParquetBlobBackend:
@@ -498,9 +496,11 @@ class _ParquetBlobBackend:
         self._container = container
         self._prefix = prefix
 
+    def _blob_name(self, path: str) -> str:
+        return f"{self._prefix}/{path}" if self._prefix else path
+
     def _blob(self, path: str):
-        name = f"{self._prefix}/{path}" if self._prefix else path
-        return self._container.get_blob_client(name)
+        return self._container.get_blob_client(self._blob_name(path))
 
     def read(self, path: str, *, missing_ok: bool = False):
         import pandas as pd
@@ -518,7 +518,7 @@ class _ParquetBlobBackend:
             raise ValueError("Use upsert for merged writes")
         out = io.BytesIO()
         data.to_parquet(out, index=False)
-        self._blob(path).upload_blob(out.getvalue(), overwrite=True)
+        BlobUtils.upload_creating_container(self._container, self._blob_name(path), out.getvalue(), overwrite=True)
 
     def upsert(self, path: str, data: Any, *, keys: list[str]) -> None:
         import pandas as pd

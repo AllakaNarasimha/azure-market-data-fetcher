@@ -3,11 +3,13 @@ trigger:
     include:
       - master
       - release/*
-pr:
-  branches:
-    include:
-      - '*'
-      
+# Uncomment to run the pipeline for PRs from any branch.
+# Also set allowNonMasterDeploy to true below, or non-master builds fail at "Validate Source Branch".
+# pr:
+#   branches:
+#     include:
+#       - '*'
+
 resources:
   repositories:
     - repository: templates
@@ -21,8 +23,6 @@ variables:
     value: $(Build.SourceBranchName)
   - name: sourceVersionMessage
     value: $(Build.SourceVersionMessage)
-  - name: allowNonMasterDeploy
-    value: 'false'
 stages:
 
 - template: master-deploy.yml@templates

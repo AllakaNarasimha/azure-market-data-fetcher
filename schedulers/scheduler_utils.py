@@ -15,6 +15,16 @@ class SchedulerContext:
     test_cache_root: Optional[str]
 
 
+def is_test_mode(now: datetime, is_holiday: Callable[[datetime], bool]) -> bool:
+    """True when this run must use TEST_MODE behaviour.
+
+    With RUN_ON_MARKET_HOURS on (default), a trading day always runs as prod, even if TEST_MODE was left on.
+    """
+    if not EnvConfig.test_mode():
+        return False
+    return not (EnvConfig.run_on_market_hours() and not is_holiday(now))
+
+
 def build_scheduler_context(now: datetime, is_holiday: Callable[[datetime], bool], is_local: bool) -> SchedulerContext:
     """Build a scheduler context.
 
@@ -23,7 +33,7 @@ def build_scheduler_context(now: datetime, is_holiday: Callable[[datetime], bool
     - is_holiday: callable accepting a datetime returning bool
     - is_local: whether running locally (BlobUtils.is_running_locally())
     """
-    test_mode_active = EnvConfig.is_test_mode_active(now)
+    test_mode_active = is_test_mode(now, is_holiday) and EnvConfig.is_test_mode_active(now)
 
     use_test_cache, test_cache_root = should_use_test_cache(
         test_mode_active, now=now, is_holiday=is_holiday, is_local=is_local
