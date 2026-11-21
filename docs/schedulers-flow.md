@@ -26,6 +26,14 @@ In pure test mode (`TEST_MODE=true`, `RUN_ON_MARKET_HOURS=false`) every job runs
 | true | `true` (default) | Normal Mon-Fri crons stay active and each job also runs once at app start. On a trading day (not weekend/holiday) every run behaves like prod (live container, no test window). On a weekend/holiday it behaves as test: startup run only inside the `TEST_MODE_MINUTES` window, scheduled fires skip, data goes to the test container, and a one-shot `test_mode_backup` runs after the window. |
 | true | `false` | Pure test mode: every job runs once at app start, test container, no recurring schedule. |
 
+## FORCE_BACKUP_ID (one-off live backup)
+
+With `TEST_MODE=false`, setting `FORCE_BACKUP_ID=<value>` makes the next app start run one live backup on any day, including weekends and holidays. The ID is recorded in `scheduler-state` (`force_backup_<id>`), so later restarts with the same value do nothing. Use a new value to force another run. A failed run is retried on later restarts, up to 3 attempts.
+
+- The container is kept unless `FORCE_BACKUP_DELETE=true` (and `DELETE_AFTER_BACKUP=true`).
+- Ignored when `TEST_MODE=true`.
+- Set it after 16:00 IST so the day's data is complete.
+
 ## Overview
 
 ```mermaid

@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -188,6 +189,17 @@ class EnvConfig:
     def delete_after_backup(cls) -> bool:
         """Delete the backed-up container once the backup is sent (env `DELETE_AFTER_BACKUP`). Default: false."""
         return (cls.env("DELETE_AFTER_BACKUP", "false") or "").strip().lower() == "true"
+
+    @classmethod
+    def force_backup_id(cls) -> str:
+        """One-off live backup token (env `FORCE_BACKUP_ID`); a new value triggers one more backup at the next start."""
+        raw = (cls.env("FORCE_BACKUP_ID", "") or "").strip()
+        return re.sub(r"[^A-Za-z0-9._-]", "-", raw)[:64]
+
+    @classmethod
+    def force_backup_delete(cls) -> bool:
+        """Delete the container after a forced backup (env `FORCE_BACKUP_DELETE`, still needs DELETE_AFTER_BACKUP). Default: false."""
+        return (cls.env("FORCE_BACKUP_DELETE", "false") or "").strip().lower() == "true"
 
     @classmethod
     def load_local_settings(cls, path: str = "local.settings.json", require_local_run: bool = True) -> bool:

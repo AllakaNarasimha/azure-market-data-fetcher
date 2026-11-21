@@ -1043,7 +1043,7 @@ def test_backup_stops_after_three_failures_or_success_despite_restart_and_deleti
         return SimpleNamespace(get_blob_client=lambda blob_name: FakeBlob(name, blob_name))
 
     class FakeBackup:
-        def __init__(self, container_name):
+        def __init__(self, container_name, trigger=None):
             assert container_name == "test-cache"
 
         def run(self):
@@ -1131,8 +1131,9 @@ def _run_live_backup(monkeypatch, backup_cls):
 
 def _backup_double(run, deleted):
     class FakeBackup:
-        def __init__(self, container_name):
+        def __init__(self, container_name, trigger=None):
             self.container_name = container_name
+            self.trigger = trigger
 
         def run(self):
             return run()
@@ -1174,6 +1175,81 @@ def test_empty_container_is_deleted_without_alert_or_retries(monkeypatch):
 
     assert ok is True
     assert deleted == ["cache"]
+    assert saved["tasks"]["backup:cache"] == "done"
+
+
+def _forced_backup(monkeypatch, env, backup_cls):
+    monkeypatch.setattr(EnvConfig, "_overrides", {"MARKET_DATA_CACHE_BLOB": "cache", "DELETE_AFTER_BACKUP": "true", **env})
+    monkeypatch.setattr(daily_scheduler_module.BlobUtils, "is_running_locally", staticmethod(lambda: False))
+    monkeypatch.setattr(daily_scheduler_module, "MarketDataBackupService", backup_cls)
+    monkeypatch.setattr(daily_progress_module.BlobUtils, "is_running_locally", staticmethod(lambda: False))
+    store = {}
+
+    class FakeBlob:
+        def __init__(self, name):
+            self.name = name
+
+        def download_blob(self):
+            if self.name not in store:
+                raise ResourceNotFoundError("missing")
+            return SimpleNamespace(readall=lambda: store[self.name])
+
+        def upload_blob(self, data, overwrite=False):
+            store[self.name] = data
+
+    monkeypatch.setattr(
+        daily_progress_module.BlobUtils, "get_container_client",
+        staticmethod(lambda name: SimpleNamespace(get_blob_client=lambda blob_name: FakeBlob(blob_name))),
+    )
+    return lambda: daily_scheduler_module.DailyScheduler().run_forced_backup()
+
+
+def test_forced_backup_runs_once_per_id_and_keeps_container_by_default(monkeypatch):
+    ran, deleted = [], []
+    result = SimpleNamespace(container="cache", blob_count=1, zip_bytes=3, telegram_message_ids=(1,), fallback_blob=None)
+    run = _forced_backup(monkeypatch, {"TEST_MODE": "false", "FORCE_BACKUP_ID": "may 1"},
+                         _backup_double(lambda: ran.append(1) or result, deleted))
+
+    assert run() is True
+    assert run() is True  # a restart with the same ID
+
+    assert ran == [1]
+    assert deleted == []
+
+
+def test_forced_backup_labels_its_trigger(monkeypatch):
+    triggers = []
+    base = _backup_double(lambda: SimpleNamespace(container="cache", blob_count=1, zip_bytes=3, telegram_message_ids=(1,), fallback_blob=None), [])
+
+    class Spy(base):
+        def __init__(self, container_name, trigger=None):
+            super().__init__(container_name, trigger)
+            triggers.append(trigger)
+
+    _forced_backup(monkeypatch, {"TEST_MODE": "false", "FORCE_BACKUP_ID": "t"}, Spy)()
+
+    assert triggers == [daily_scheduler_module.TRIGGER_FORCED]
+
+def test_forced_backup_deletes_only_when_asked(monkeypatch):
+    deleted = []
+    result = SimpleNamespace(container="cache", blob_count=1, zip_bytes=3, telegram_message_ids=(1,), fallback_blob=None)
+    run = _forced_backup(monkeypatch, {"TEST_MODE": "false", "FORCE_BACKUP_ID": "x", "FORCE_BACKUP_DELETE": "true"},
+                         _backup_double(lambda: result, deleted))
+
+    run()
+
+    assert deleted == ["cache"]
+
+
+@pytest.mark.parametrize("env", [{"TEST_MODE": "false"}, {"TEST_MODE": "true", "FORCE_BACKUP_ID": "x"}])
+def test_forced_backup_is_skipped_without_id_or_in_test_mode(monkeypatch, env):
+    ran = []
+    run = _forced_backup(monkeypatch, env, _backup_double(lambda: ran.append(1), []))
+
+    assert run() is True
+    assert ran == []
+
+
 def test_active_test_session_uses_test_cache_during_market_hours(monkeypatch, market_session):
     monkeypatch.setattr(EnvConfig, "_overrides", {"TEST_MODE": "true"})
 

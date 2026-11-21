@@ -99,6 +99,22 @@ if ENABLE_BACKGROUND_TRIGGERS:
         except Exception as ex:
             logging.exception(f"[daily_market_backup] DailyScheduler.run_backup() failed: {ex!r}")
 
+    if EnvConfig.force_backup_id() and not TEST_MODE:
+        # Runs at every host start but is a no-op once this FORCE_BACKUP_ID was handled (recorded in scheduler-state).
+        @app.timer_trigger(
+            schedule=TEST_MODE_ONCE_CRON,
+            arg_name="forcedBackupTimer",
+            run_on_startup=True,
+            use_monitor=False,
+        )
+        def forced_backup(forcedBackupTimer: func.TimerRequest) -> None:
+            logging.info("[forced_backup] triggered")
+            try:
+                ok = DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run_forced_backup()
+                logging.info(f"[forced_backup] finished; backup ok: {ok}")
+            except Exception as ex:
+                logging.exception(f"[forced_backup] DailyScheduler.run_forced_backup() failed: {ex!r}")
+
     if TEST_MODE_WITH_PROD_SCHEDULE:
         # The live backup above skips test-mode runs, so a startup on a non-trading day still gets its test backup.
         @app.timer_trigger(
