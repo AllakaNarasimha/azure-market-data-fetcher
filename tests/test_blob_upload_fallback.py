@@ -49,6 +49,12 @@ def test_destinations_payload_and_attempt_order(upload_setup, container, overwri
         call.primary.get_blob_client(mapped),
         call.primary.get_blob_client().upload_blob(data, overwrite=overwrite),
     ]
+    if failure is ResourceNotFoundError:
+        # A missing container is created and the upload retried before the fallback runs.
+        expected += [
+            call.primary.create_container(),
+            call.primary.get_blob_client().upload_blob(data, overwrite=overwrite),
+        ]
     if failure:
         expected += [
             call.acquire(container, "explicit-connection"),

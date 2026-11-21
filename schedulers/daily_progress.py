@@ -74,7 +74,11 @@ class DailyProgress:
                 return
             blob = self._blob()
             if blob:
-                blob.upload_blob(payload.encode(), overwrite=True)
+                try:
+                    blob.upload_blob(payload.encode(), overwrite=True)
+                except ResourceNotFoundError:
+                    BlobUtils.create_missing_container(self._container_client)
+                    blob.upload_blob(payload.encode(), overwrite=True)
         except Exception:
             if self._strict:
                 raise

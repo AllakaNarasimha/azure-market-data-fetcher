@@ -75,11 +75,6 @@ class DailyScheduler:
             bdm.MasterFileCache.cleanup_old_dated_folders()
             return True
 
-        if test_mode:
-            BlobUtils.ensure_container(BlobUtils.test_mode_cache_blob())
-        else:
-            BlobUtils.ensure_container(BlobUtils.market_data_cache_blob())
-
         symbols = EnvConfig.watchlist_symbols()
         option_chain_symbols = EnvConfig.option_chain_symbols()
 

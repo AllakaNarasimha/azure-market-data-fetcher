@@ -282,7 +282,7 @@ class MarketDataBackupService:
         # One file per day and container, so a same-day retry overwrites instead of adding a second copy.
         blob_name = f"{now:%Y-%m-%d}/{self.container_name}.zip"
         with zip_path.open("rb") as data:
-            container.get_blob_client(blob_name).upload_blob(data, overwrite=True, max_concurrency=2)
+            BlobUtils.upload_creating_container(container, blob_name, data, overwrite=True, max_concurrency=2)
         logger.error("[Backup] ZIP saved to %s/%s after Telegram failure", FAILED_BACKUP_CONTAINER, blob_name)
         return blob_name
 

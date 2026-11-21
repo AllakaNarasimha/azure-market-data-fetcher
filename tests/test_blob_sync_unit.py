@@ -30,16 +30,38 @@ def test_get_container_is_cached(cloud, monkeypatch):
     assert calls == ["c1"]
 
 
-def test_list_blobs_recreates_container_deleted_after_caching(monkeypatch):
+def test_list_blobs_of_missing_container_is_empty_and_does_not_create_it(monkeypatch):
     gone = ResourceNotFoundError("gone")
     gone.error_code = "ContainerNotFound"
-    stale, fresh = MagicMock(), MagicMock()
-    stale.list_blobs.side_effect = gone
-    fresh.list_blobs.return_value = ["b"]
-    clients = iter([stale, fresh])
-    monkeypatch.setattr(BlobUtils, "get_container_client", staticmethod(lambda name, conn=None: next(clients)))
+    container = MagicMock()
+    container.list_blobs.side_effect = gone
+    monkeypatch.setattr(BlobUtils, "get_container_client", staticmethod(lambda name, conn=None: container))
 
-    assert BlobSync().list_blobs("c1") == ["b"]
+    assert BlobSync().list_blobs("c1") == []
+    container.create_container.assert_not_called()
+
+
+def test_upload_creates_missing_container_and_retries(cloud):
+    blob = cloud.get_blob_client.return_value
+    blob.upload_blob.side_effect = [ResourceNotFoundError("ContainerNotFound"), None]
+
+    assert BlobSync().upload_content("c1", "a.json", b"x") is True
+    cloud.create_container.assert_called_once()
+    assert blob.upload_blob.call_count == 2
+
+
+def test_upload_does_not_create_container_when_it_exists(cloud):
+    assert BlobSync().upload_content("c1", "a.json", b"x") is True
+    cloud.create_container.assert_not_called()
+
+
+def test_get_container_client_does_not_create_container(monkeypatch):
+    service = MagicMock()
+    monkeypatch.setattr("utils.blob_utils.BlobServiceClient.from_connection_string", lambda conn: service)
+
+    BlobUtils.get_container_client("c1", "conn")
+
+    service.get_container_client.return_value.create_container.assert_not_called()
 
 
 def test_list_blobs_does_not_retry_other_not_found_errors(cloud):
