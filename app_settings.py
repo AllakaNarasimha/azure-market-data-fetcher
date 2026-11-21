@@ -13,6 +13,9 @@ EnvConfig.load_local_settings()
 # Timezone and runtime mode
 IST_TZ = pytz.timezone(MarketTimes.timezone())
 TEST_MODE = EnvConfig.test_mode()
+# Default true: a TEST_MODE left on by mistake still runs the normal schedule on trading days.
+RUN_ON_MARKET_HOURS = EnvConfig.run_on_market_hours()
+USE_PROD_SCHEDULE = (not TEST_MODE) or RUN_ON_MARKET_HOURS
 IS_RUNNING_LOCALLY = BlobUtils.is_running_locally()
 MARKET_OPEN_TIME = MarketTimes.open()
 MARKET_CLOSE_TIME = MarketTimes.close()
@@ -30,9 +33,9 @@ HISTORY_INTERVAL = EnvConfig.history_interval()
 # Parallelism / cron calculation
 PARALLEL_BATCH_SIZE = int(EnvConfig.env("PARALLEL_BATCH_SIZE", "5") or "5")
 
-_option_chain_weekday_field = "*" if TEST_MODE else "1-5"
+_option_chain_weekday_field = "1-5" if USE_PROD_SCHEDULE else "*"
 # Azure timer hours default to UTC, so keep this window aligned with IST market hours.
-_option_chain_hour_field = "*" if TEST_MODE else "3-10"
+_option_chain_hour_field = "3-10" if USE_PROD_SCHEDULE else "*"
 
 DYNAMIC_OPTION_CHAIN_CRON = calculate_dynamic_option_chain_cron(
     len(OPTION_CHAIN_SYMBOLS), PARALLEL_BATCH_SIZE, weekday_field=_option_chain_weekday_field, hour_field=_option_chain_hour_field
@@ -40,8 +43,9 @@ DYNAMIC_OPTION_CHAIN_CRON = calculate_dynamic_option_chain_cron(
 
 # Log startup environment for visibility
 logging.info(
-    "Startup env: TEST_MODE=%r, WEBSITE_SITE_NAME=%r, WEBSITE_SLOT_NAME=%r, ENVIRONMENT=%r",
+    "Startup env: TEST_MODE=%r, RUN_ON_MARKET_HOURS=%r, WEBSITE_SITE_NAME=%r, WEBSITE_SLOT_NAME=%r, ENVIRONMENT=%r",
     EnvConfig.env("TEST_MODE"),
+    RUN_ON_MARKET_HOURS,
     BlobUtils.website_site_name(),
     BlobUtils.website_slot_name(),
     BlobUtils.environment(),

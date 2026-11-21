@@ -463,8 +463,11 @@ class BlobSync:
         return True
 
     def container_exists(self, container_name: str) -> bool:
-        container_client = self.get_container(container_name)
-        return bool(container_client and container_client.exists())
+        """Pure check; unlike get_container it never creates the container."""
+        conn_str = self._connection_string or EnvConfig.market_storage_connection()
+        if not conn_str:
+            return False
+        return BlobServiceClient.from_connection_string(conn_str).get_container_client(container_name).exists()
 
     def _require_container(self, container_name: str) -> ContainerClient:
         container_client = self.get_container(container_name)
@@ -472,9 +475,23 @@ class BlobSync:
             raise RuntimeError(f"No storage connection; cannot access container '{container_name}'")
         return container_client
 
+    def _with_container(self, container_name: str, work):
+        """Run `work(container_client)`; if the container vanished since it was cached, recreate it and retry once."""
+        try:
+            return work(self._require_container(container_name))
+        except ResourceNotFoundError as error:
+            if getattr(error, "error_code", None) != "ContainerNotFound":
+                raise
+        logger.warning("[BLOB SYNC] Container '%s' not found; recreating and retrying", container_name)
+        self._containers.pop(container_name, None)
+        BlobUtils.forget_container(container_name, self._connection_string)
+        return work(self._require_container(container_name))
+
     def read_content(self, container_name: str, blob_name: str) -> bytes:
         """Download a blob's bytes. Raises ResourceNotFoundError when the blob is missing."""
-        return self._require_container(container_name).get_blob_client(blob_name).download_blob().readall()
+        return self._with_container(
+            container_name, lambda c: c.get_blob_client(blob_name).download_blob().readall()
+        )
 
     def read_if_exists(self, container_name: str, blob_name: str) -> Optional[bytes]:
         try:
@@ -483,12 +500,20 @@ class BlobSync:
             return None
 
     def list_blobs(self, container_name: str, prefix: str = "") -> list:
-        return list(self._require_container(container_name).list_blobs(name_starts_with=prefix or None))
+        return self._with_container(
+            container_name, lambda c: list(c.list_blobs(name_starts_with=prefix or None))
+        )
 
     def list_prefixes(self, container_name: str, prefix: str = "") -> list[str]:
         """Immediate virtual folders under `prefix`."""
-        blobs = self._require_container(container_name).walk_blobs(name_starts_with=prefix or None, delimiter="/")
-        return [item.name for item in blobs if isinstance(item, BlobPrefix)]
+        return self._with_container(
+            container_name,
+            lambda c: [
+                item.name
+                for item in c.walk_blobs(name_starts_with=prefix or None, delimiter="/")
+                if isinstance(item, BlobPrefix)
+            ],
+        )
 
 
 class _ParquetBlobBackend:

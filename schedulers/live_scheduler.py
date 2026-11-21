@@ -11,7 +11,7 @@ from storage.market_data_cache import OptionChainCacheManager
 from utils.env_config import EnvConfig
 from utils.shared_cache import EXPIRIES_CACHE
 from schedulers.market_calendar import MarketCalendar
-from schedulers.scheduler_utils import build_scheduler_context, is_market_open
+from schedulers.scheduler_utils import build_scheduler_context, is_market_open, is_test_mode
 
 
 class LiveScheduler:
@@ -25,7 +25,7 @@ class LiveScheduler:
     def _can_collect() -> bool:
         now = datetime.now(pytz.timezone(MarketTimes.timezone()))
         return is_market_open(now, MarketCalendar.is_holiday) and (
-            not EnvConfig.test_mode() or EnvConfig.is_test_mode_active(now)
+            not is_test_mode(now, MarketCalendar.is_holiday) or EnvConfig.is_test_mode_active(now)
         )
 
     def run(self, symbols: list[str] | None = None, batch_second: int | None = None) -> None:

@@ -13,9 +13,9 @@ from utils.env_config import EnvConfig
 from utils.shared_cache import EXPIRIES_CACHE
 from schedulers.daily_progress import DailyProgress, STATUS_DONE
 from schedulers.market_calendar import MarketCalendar
-from schedulers.scheduler_utils import build_scheduler_context
+from schedulers.scheduler_utils import build_scheduler_context, is_test_mode
 from schedulers.live_scheduler import LiveScheduler
-from services.market_data_backup_service import MarketDataBackupService
+from services.market_data_backup_service import MarketDataBackupService, NothingToBackUpError
 
 
 class DailyBudgetExceeded(Exception):
@@ -29,11 +29,15 @@ class DailyScheduler:
         self.history_interval = history_interval if history_interval is not None else EnvConfig.history_interval()
         self._deadline: float | None = None
 
+    @staticmethod
+    def _test_mode(now: datetime) -> bool:
+        return is_test_mode(now, MarketCalendar.is_holiday)
+
     def _out_of_time(self) -> bool:
         now = datetime.now(pytz.timezone(MarketTimes.timezone()))
         return (
             now.time() > MarketTimes.close()
-            or (EnvConfig.test_mode() and not EnvConfig.is_test_mode_active(now))
+            or (self._test_mode(now) and not EnvConfig.is_test_mode_active(now))
             or (self._deadline is not None and time.monotonic() >= self._deadline)
         )
 
@@ -42,7 +46,7 @@ class DailyScheduler:
         """One progress record per day; in TEST_MODE per app start, so a restart runs the job again."""
         key = now.strftime("%Y-%m-%d")
         started = EnvConfig.get_test_mode_start()
-        if EnvConfig.test_mode() and started is not None:
+        if DailyScheduler._test_mode(now) and started is not None:
             key += "_test_" + started.strftime("%H%M%S")
         return key
 
@@ -58,19 +62,20 @@ class DailyScheduler:
         IST_TZ = pytz.timezone(MarketTimes.timezone())
         now = datetime.now(IST_TZ)
 
+        test_mode = self._test_mode(now)
         if now.time() > MarketTimes.close():
             logging.info("[DailyScheduler] Market has closed. Skipping daily job.")
             return True
-        if EnvConfig.test_mode() and not EnvConfig.is_test_mode_active(now):
+        if test_mode and not EnvConfig.is_test_mode_active(now):
             logging.info("[DailyScheduler] TEST_MODE window ended. Skipping daily job.")
             return True
-        if not EnvConfig.test_mode() and MarketCalendar.is_holiday(now):
+        if not test_mode and MarketCalendar.is_holiday(now):
             logging.info("Market holiday. Skipping daily job.")
             # Still prune old broker-master folders even when the rest of the job is skipped
             bdm.MasterFileCache.cleanup_old_dated_folders()
             return True
 
-        if EnvConfig.test_mode():
+        if test_mode:
             BlobUtils.ensure_container(BlobUtils.test_mode_cache_blob())
         else:
             BlobUtils.ensure_container(BlobUtils.market_data_cache_blob())
@@ -128,20 +133,27 @@ class DailyScheduler:
             logging.warning("=== Daily Job paused: time budget or collection window ended ===")
         return complete
 
-    def run_backup(self) -> bool:
+    def run_backup(self, only: str | None = None) -> bool:
         """Zip the day's market-data container and send it to Telegram, once per trading day.
 
         Returns True when the backup is done (now or earlier today) or not needed. Returns False when it
         failed or was skipped because the TEST_MODE window is still open or was never initialized.
+        `only` ("live" or "test") makes the call a no-op when the effective mode differs, so a live
+        schedule and a one-shot test schedule can share this method without touching each other's container.
         """
         IST_TZ = pytz.timezone(MarketTimes.timezone())
         now = datetime.now(IST_TZ)
+        test_mode = self._test_mode(now)
 
-        if not EnvConfig.test_mode() and MarketCalendar.is_holiday(now):
+        if only is not None and (only == "test") != test_mode:
+            logging.info("[DailyScheduler] Backup skipped: this trigger handles %s mode only", only)
+            return True
+
+        if not test_mode and MarketCalendar.is_holiday(now):
             logging.info("[DailyScheduler] Market holiday. Skipping backup.")
             return True
 
-        if EnvConfig.test_mode():
+        if test_mode:
             if EnvConfig.get_test_mode_expiry() is None:
                 # The window was never initialized in this process, so the backup cannot be scheduled.
                 logging.warning("[DailyScheduler] TEST_MODE window was not initialized; backup skipped")
@@ -154,7 +166,7 @@ class DailyScheduler:
         else:
             container = BlobUtils.market_data_cache_blob()
 
-        if EnvConfig.test_mode():
+        if test_mode:
             # Each test-mode start opens a new window, so it gets its own run key and backs up again.
             run_key = f"{now:%Y-%m-%d}_test_{EnvConfig.get_test_mode_expiry():%Y%m%dT%H%M%S}_backup"
         else:
@@ -171,28 +183,47 @@ class DailyScheduler:
 
         progress.record(task, False)
         try:
-            backup_service = MarketDataBackupService(container_name=container)
-            result = backup_service.run()
+            result = MarketDataBackupService(container_name=container).run()
+        except NothingToBackUpError:
+            self._retire_empty_container(progress, task, delete_task, container)
+            return True
+        except Exception as ex:
+            logging.exception(f"[DailyScheduler] Backup failed for container {container}: {ex!r}")
+            logging.info("[DailyScheduler] Container deletion skipped: backup failed; container=%s", container)
+            if progress.is_finished(task):
+                logging.error("[DailyScheduler] Backup stopped after %d attempts; container=%s", progress.MAX_ATTEMPTS, container)
+            return False
+
+        self._log_backup_result(result)
+        if result.fallback_blob:
+            # Leaves a trace in the day's record: the only copy is in backup-failed, not Telegram.
+            progress.note(f"fallback:{container}", result.fallback_blob)
+        progress.record(task, True)
+        self._delete_backed_up_container(progress, delete_task, container, result=result)
+        return True
+
+    @staticmethod
+    def _log_backup_result(result) -> None:
+        if result.fallback_blob:
+            logging.error(
+                "[DailyScheduler] Backup NOT delivered to Telegram; ZIP saved as %s: container=%s blobs=%d",
+                result.fallback_blob, result.container, result.blob_count,
+            )
+        else:
             logging.info(
                 "[DailyScheduler] Backup sent: container=%s blobs=%d zip_bytes=%d telegram_message_ids=%s",
                 result.container, result.blob_count, result.zip_bytes, result.telegram_message_ids,
             )
-            success = True
-        except Exception as ex:
-            logging.exception(f"[DailyScheduler] Backup failed for container {container}: {ex!r}")
-            success = False
-        if success:
-            progress.record(task, True)
-            self._delete_backed_up_container(progress, delete_task, container, result=result)
-        else:
-            logging.info("[DailyScheduler] Container deletion skipped: backup failed; container=%s", container)
-            if progress.is_finished(task):
-                logging.error("[DailyScheduler] Backup stopped after %d attempts; container=%s", progress.MAX_ATTEMPTS, container)
-        return success
 
-    def _delete_backed_up_container(self, progress, delete_task: str, container: str, result) -> None:
-        """Delete the backed-up container once. A restart (result None) may delete only in TEST_MODE."""
-        if result is None and not EnvConfig.test_mode():
+    def _retire_empty_container(self, progress, task: str, delete_task: str, container: str) -> None:
+        # Nothing to lose: an empty container is not a failure, so retiring it needs no retries or alert.
+        logging.warning("[DailyScheduler] Container %s is empty; nothing to back up", container)
+        progress.record(task, True)
+        self._delete_backed_up_container(progress, delete_task, container, result=None, empty=True)
+
+    def _delete_backed_up_container(self, progress, delete_task: str, container: str, result, empty: bool = False) -> None:
+        """Delete the backed-up container once. A restart (result None) may delete only in TEST_MODE; an empty one always may."""
+        if result is None and not empty and not self._test_mode(datetime.now(pytz.timezone(MarketTimes.timezone()))):
             logging.info("[DailyScheduler] Container deletion skipped: no backup in this run; container=%s", container)
             return
         backup_service = MarketDataBackupService(container_name=container)
