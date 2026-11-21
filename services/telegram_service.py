@@ -15,6 +15,7 @@ class TelegramUploadError(RuntimeError):
     """Raised when Telegram does not confirm the document upload."""
 
 
+
 class TelegramService:
     # Conservative limit below Telegram Bot API's standard 50 MB document limit.
     MAX_DOCUMENT_BYTES = 49_000_000
@@ -61,15 +62,17 @@ class TelegramService:
                     )
                 return self._message_id(response, "document")
             except requests.RequestException as exc:
+                # The reason shows why the upload failed (reset, broken pipe); the token is redacted.
+                reason = self._connection.redact(str(exc))[:300]
                 if attempt == self.MAX_SEND_ATTEMPTS:
                     # Do not include exception URLs in logs: Telegram URLs contain bot tokens.
                     raise TelegramUploadError(
-                        f"Telegram request failed ({type(exc).__name__}) after {attempt} attempts; "
+                        f"Telegram request failed ({type(exc).__name__}: {reason}) after {attempt} attempts; "
                         "check network connectivity and bot configuration"
                     ) from None
                 logger.warning(
-                    "[Telegram] Document upload attempt %d/%d failed (%s); retrying in %ds",
-                    attempt, self.MAX_SEND_ATTEMPTS, type(exc).__name__, self.RETRY_BACKOFF_SECONDS * attempt,
+                    "[Telegram] Document upload attempt %d/%d failed (%s: %s); retrying in %ds",
+                    attempt, self.MAX_SEND_ATTEMPTS, type(exc).__name__, reason, self.RETRY_BACKOFF_SECONDS * attempt,
                 )
                 time.sleep(self.RETRY_BACKOFF_SECONDS * attempt)
 
