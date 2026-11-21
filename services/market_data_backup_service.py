@@ -77,9 +77,20 @@ class MarketDataBackupService:
         for stale_dir in glob.glob(pattern):
             shutil.rmtree(stale_dir, ignore_errors=True)
 
+    def _also_deletes_broker_master(self) -> bool:
+        return self.container_name == BlobUtils.market_data_cache_blob()
+
     def delete_source_container(self) -> bool:
-        """Delete the backed-up container; call only after `run()` succeeded."""
-        return self._blob_sync.delete_container(self.container_name)
+        """Delete the backed-up container; call only after `run()` succeeded.
+
+        A live backup also deletes the shared broker-master container it archived; it is recreated on next access.
+        Test-mode backups leave it alone because live runs share it.
+        """
+        deleted = self._blob_sync.delete_container(self.container_name)
+        # The backup runs after market close, so nothing writes to broker-master between the zip and this delete.
+        if deleted and self._also_deletes_broker_master():
+            deleted = self._blob_sync.delete_container(BlobUtils.BROKER_DATA_BLOB)
+        return deleted
 
     def source_container_exists(self) -> bool:
         return self._blob_sync.container_exists(self.container_name)
@@ -92,10 +103,13 @@ class MarketDataBackupService:
         else:
             outcome = "Blob container deleted after successful backup"
             delivered = f"Backup message ID(s): {', '.join(str(i) for i in result.telegram_message_ids)}"
+        containers = self.container_name
+        if self._also_deletes_broker_master():
+            containers = f"{self.container_name}, {BlobUtils.BROKER_DATA_BLOB}"
         return TelegramService.from_environment().send_message(
             f"{outcome}\n"
             f"Source: {EnvConfig.source_label()}\n"
-            f"Container: {self.container_name}\n"
+            f"Container: {containers}\n"
             f"Date: {now:%Y-%m-%d %H:%M:%S} {now.tzname()}\n"
             f"Total backed-up blobs (market data and broker masters): {result.blob_count}\n"
             f"Total source data: {result.source_bytes:,} bytes\n"
@@ -119,6 +133,8 @@ class MarketDataBackupService:
                 blob_count, source_bytes = self._retry(
                     "ZIP creation", lambda: self._build_zip(zip_path, containers), no_retry=NothingToBackUpError
                 )
+            except NothingToBackUpError:
+                raise
             except Exception as zip_error:
                 self._send_alert(
                     telegram,

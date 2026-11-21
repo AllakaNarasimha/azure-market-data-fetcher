@@ -30,6 +30,35 @@ def test_get_container_is_cached(cloud, monkeypatch):
     assert calls == ["c1"]
 
 
+def test_list_blobs_recreates_container_deleted_after_caching(monkeypatch):
+    gone = ResourceNotFoundError("gone")
+    gone.error_code = "ContainerNotFound"
+    stale, fresh = MagicMock(), MagicMock()
+    stale.list_blobs.side_effect = gone
+    fresh.list_blobs.return_value = ["b"]
+    clients = iter([stale, fresh])
+    monkeypatch.setattr(BlobUtils, "get_container_client", staticmethod(lambda name, conn=None: next(clients)))
+
+    assert BlobSync().list_blobs("c1") == ["b"]
+
+
+def test_list_blobs_does_not_retry_other_not_found_errors(cloud):
+    cloud.list_blobs.side_effect = ResourceNotFoundError("other")
+    with pytest.raises(ResourceNotFoundError):
+        BlobSync().list_blobs("c1")
+
+
+def test_container_exists_does_not_create_container(monkeypatch):
+    created = []
+    monkeypatch.setattr(BlobUtils, "get_container_client", staticmethod(lambda name, conn=None: created.append(name)))
+    service = MagicMock()
+    service.get_container_client.return_value.exists.return_value = False
+    monkeypatch.setattr("utils.blob_utils.BlobServiceClient.from_connection_string", lambda conn: service)
+
+    assert BlobSync(connection_string="conn").container_exists("c1") is False
+    assert created == []
+
+
 def test_read_content_returns_downloaded_bytes(cloud):
     cloud.get_blob_client.return_value.download_blob.return_value.readall.return_value = b"abc"
     assert BlobSync().read_content("c1", "x.csv") == b"abc"

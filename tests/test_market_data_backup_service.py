@@ -221,6 +221,39 @@ def test_zip_failure_sends_alert(monkeypatch):
     assert "ZIP creation failed" in telegram.messages[0]
 
 
+def test_live_deletion_also_deletes_broker_master_but_test_mode_does_not(monkeypatch):
+    monkeypatch.setattr(BlobUtils, "market_data_cache_blob", staticmethod(lambda: "live-cache"))
+    deleted = []
+    sync = SimpleNamespace(delete_container=lambda name: deleted.append(name) or True)
+
+    assert MarketDataBackupService(container_name="live-cache", blob_sync=sync).delete_source_container()
+    assert deleted == ["live-cache", BlobUtils.BROKER_DATA_BLOB]
+
+    deleted.clear()
+    assert MarketDataBackupService(container_name="test-cache", blob_sync=sync).delete_source_container()
+    assert deleted == ["test-cache"]
+
+
+def test_failed_broker_master_delete_is_reported_and_retry_succeeds(monkeypatch):
+    monkeypatch.setattr(BlobUtils, "market_data_cache_blob", staticmethod(lambda: "live-cache"))
+    outcomes = iter([True, False, True, True])
+    sync = SimpleNamespace(delete_container=lambda name: next(outcomes))
+    service = MarketDataBackupService(container_name="live-cache", blob_sync=sync)
+
+    assert service.delete_source_container() is False
+    assert service.delete_source_container() is True
+
+
+def test_live_deletion_notice_lists_broker_master(monkeypatch):
+    monkeypatch.setattr(BlobUtils, "market_data_cache_blob", staticmethod(lambda: "market"))
+    telegram = FakeTelegram()
+    service = _service(monkeypatch, {"market": ["a.csv"]}, telegram, None)
+
+    service.notify_container_deleted(svc.BackupResult("market", 1, 10, 5, (1,)))
+
+    assert f"Container: market, {BlobUtils.BROKER_DATA_BLOB}" in telegram.messages[0]
+
+
 def test_source_label_in_caption_and_alert(monkeypatch):
     monkeypatch.setenv("ENVIRONMENT", "dev")
     monkeypatch.setenv("TEST_MODE", "true")
