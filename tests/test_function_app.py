@@ -1043,7 +1043,7 @@ def test_backup_stops_after_three_failures_or_success_despite_restart_and_deleti
         return SimpleNamespace(get_blob_client=lambda blob_name: FakeBlob(name, blob_name))
 
     class FakeBackup:
-        def __init__(self, container_name):
+        def __init__(self, container_name, trigger=None):
             assert container_name == "test-cache"
 
         def run(self):

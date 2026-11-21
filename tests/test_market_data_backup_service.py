@@ -265,7 +265,8 @@ def test_source_label_in_caption_and_alert(monkeypatch):
     monkeypatch.setattr(svc.TelegramService, "from_environment", classmethod(lambda cls: telegram))
 
     MarketDataBackupService(container_name="market", blob_sync=sync).run()
-    MarketDataBackupService._send_alert(telegram, "hello")
+    MarketDataBackupService(container_name="market", blob_sync=sync, trigger=svc.TRIGGER_FORCED)._send_alert(telegram, "hello")
 
     assert "Source: dev-test" in captions[0]
-    assert telegram.messages[0].startswith("Source: dev-test\n")
+    assert "Trigger: scheduled timer" in captions[0]
+    assert telegram.messages[0].startswith("Source: dev-test\nTrigger: forced (FORCE_BACKUP_ID)\n")
