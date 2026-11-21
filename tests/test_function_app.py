@@ -1,4 +1,5 @@
 import importlib
+import json
 import logging
 import os
 import sys
@@ -20,6 +21,12 @@ from utils.market_times import MarketTimes
 from utils.cache_utils import is_test_blob_path, test_blob_name as build_test_blob_name
 from utils.env_config import EnvConfig
 from utils.shared_cache import EXPIRIES_CACHE
+
+
+@pytest.fixture(autouse=True)
+def pure_test_mode_by_default(monkeypatch):
+    # Existing tests cover the plain TEST_MODE flow; RUN_ON_MARKET_HOURS tests opt in explicitly.
+    monkeypatch.setenv("RUN_ON_MARKET_HOURS", "false")
 
 
 @pytest.fixture
@@ -971,6 +978,60 @@ def test_background_triggers_registered(monkeypatch):
     assert chain_binding["runOnStartup"] is False
 
 
+def test_test_mode_with_run_on_market_hours_keeps_prod_schedule_and_startup_run(monkeypatch):
+    monkeypatch.setenv("RUN_ON_MARKET_HOURS", "true")
+    fa = setupDependencies(monkeypatch, minutes=5, symbols="NSE:A-EQ,NSE:B-EQ")
+    functions = {f.get_function_name(): f for f in fa.app.get_functions()}
+
+    daily = functions["daily_job"].get_bindings_dict()["bindings"][0]
+    assert daily["schedule"] == "0 0,10,20,30,40 3 * * 1-5"
+    assert daily["runOnStartup"] is True
+
+    chain = functions["option_chain_fetcher"].get_bindings_dict()["bindings"][0]
+    assert chain["schedule"] == fa.DYNAMIC_OPTION_CHAIN_CRON
+    assert chain["schedule"].split(" ")[-1] == "1-5"
+    assert chain["runOnStartup"] is True
+
+    backup = functions["daily_market_backup"].get_bindings_dict()["bindings"][0]
+    assert backup["schedule"] == "0 30 11 * * 1-5"
+    assert "test_mode_backup" in functions
+
+
+def test_run_on_market_hours_defaults_to_true_when_env_missing(monkeypatch):
+    monkeypatch.delenv("RUN_ON_MARKET_HOURS", raising=False)
+    monkeypatch.setattr(EnvConfig, "_overrides", {})
+    assert EnvConfig.run_on_market_hours() is True
+
+
+@pytest.mark.parametrize(
+    "run_on_market_hours, day, expected",
+    [
+        ("true", datetime(2026, 11, 5, 10), False),   # trading day: prod behaviour
+        ("true", datetime(2026, 11, 7, 10), True),    # Saturday: test behaviour
+        ("false", datetime(2026, 11, 5, 10), True),   # flag off: always test behaviour
+    ],
+)
+def test_is_test_mode_depends_on_trading_day_and_flag(monkeypatch, run_on_market_hours, day, expected):
+    from schedulers.scheduler_utils import is_test_mode
+
+    monkeypatch.setattr(EnvConfig, "_overrides", {})
+    monkeypatch.setenv("TEST_MODE", "true")
+    monkeypatch.setenv("RUN_ON_MARKET_HOURS", run_on_market_hours)
+    now = pytz.timezone(MarketTimes.timezone()).localize(day)
+
+    assert is_test_mode(now, MarketCalendar.is_holiday) is expected
+
+
+def test_is_test_mode_is_false_when_test_mode_off(monkeypatch):
+    from schedulers.scheduler_utils import is_test_mode
+
+    monkeypatch.setattr(EnvConfig, "_overrides", {})
+    monkeypatch.setenv("TEST_MODE", "false")
+    now = pytz.timezone(MarketTimes.timezone()).localize(datetime(2026, 11, 7, 10))
+
+    assert is_test_mode(now, MarketCalendar.is_holiday) is False
+
+
 def test_test_mode_runs_jobs_once_on_startup(monkeypatch):
     fa = setupDependencies(monkeypatch, minutes=5, symbols="NSE:A-EQ,NSE:B-EQ")
     functions = {function.get_function_name(): function for function in fa.app.get_functions()}
@@ -1076,7 +1137,7 @@ def test_backup_stops_after_three_failures_or_success_despite_restart_and_deleti
             calls.append("backup")
             if not backup_succeeds:
                 raise ResourceNotFoundError("ContainerNotFound")
-            return SimpleNamespace(container="test-cache", blob_count=1, zip_bytes=10, telegram_message_ids=(1,))
+            return SimpleNamespace(container="test-cache", blob_count=1, zip_bytes=10, telegram_message_ids=(1,), fallback_blob=None)
 
         def delete_source_container(self):
             calls.append("delete")
@@ -1117,6 +1178,89 @@ def test_backup_stops_after_three_failures_or_success_despite_restart_and_deleti
         assert "test-cache" not in containers
 
 
+def _run_live_backup(monkeypatch, backup_cls):
+    """Run the live-mode backup at 17:00 with `backup_cls` as the backup service; returns (run_backup result, saved progress)."""
+    fixed_now = pytz.timezone(MarketTimes.timezone()).localize(datetime(2026, 11, 5, 17))
+    store = {}
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+
+    class FakeBlob:
+        def __init__(self, name):
+            self.name = name
+
+        def download_blob(self):
+            if self.name not in store:
+                raise ResourceNotFoundError("missing")
+            return SimpleNamespace(readall=lambda: store[self.name])
+
+        def upload_blob(self, data, overwrite=False):
+            store[self.name] = data
+
+    monkeypatch.setattr(EnvConfig, "_overrides", {
+        "TEST_MODE": "false", "MARKET_DATA_CACHE_BLOB": "cache", "DELETE_AFTER_BACKUP": "true",
+    })
+    monkeypatch.setattr(MarketCalendar, "is_holiday", staticmethod(lambda now: False))
+    monkeypatch.setattr(daily_scheduler_module, "datetime", FixedDateTime)
+    monkeypatch.setattr(daily_scheduler_module.BlobUtils, "is_running_locally", staticmethod(lambda: False))
+    monkeypatch.setattr(daily_scheduler_module, "MarketDataBackupService", backup_cls)
+    monkeypatch.setattr(daily_progress_module.BlobUtils, "is_running_locally", staticmethod(lambda: False))
+    monkeypatch.setattr(
+        daily_progress_module.BlobUtils, "get_container_client",
+        staticmethod(lambda name: SimpleNamespace(get_blob_client=lambda blob_name: FakeBlob(blob_name))),
+    )
+    result = daily_scheduler_module.DailyScheduler().run_backup()
+    return result, json.loads(store["daily_progress/2026-11-05_live_backup.json"])
+
+
+def _backup_double(run, deleted):
+    class FakeBackup:
+        def __init__(self, container_name):
+            self.container_name = container_name
+
+        def run(self):
+            return run()
+
+        def source_container_exists(self):
+            return True
+
+        def delete_source_container(self):
+            deleted.append(self.container_name)
+            return True
+
+        def notify_container_deleted(self, result):
+            return 1
+
+    return FakeBackup
+
+
+def test_fallback_backup_is_recorded_and_container_is_deleted(monkeypatch):
+    deleted = []
+    fallback = SimpleNamespace(
+        container="cache", blob_count=1, source_bytes=5, zip_bytes=3,
+        telegram_message_ids=(), fallback_blob="2026-11-05/cache.zip",
+    )
+
+    ok, saved = _run_live_backup(monkeypatch, _backup_double(lambda: fallback, deleted))
+
+    assert ok is True
+    assert deleted == ["cache"]
+    assert saved["tasks"]["fallback:cache"] == "2026-11-05/cache.zip"
+
+
+def test_empty_container_is_deleted_without_alert_or_retries(monkeypatch):
+    deleted = []
+
+    def empty():
+        raise daily_scheduler_module.NothingToBackUpError("empty")
+
+    ok, saved = _run_live_backup(monkeypatch, _backup_double(empty, deleted))
+
+    assert ok is True
+    assert deleted == ["cache"]
 def test_active_test_session_uses_test_cache_during_market_hours(monkeypatch, market_session):
     monkeypatch.setattr(EnvConfig, "_overrides", {"TEST_MODE": "true"})
 

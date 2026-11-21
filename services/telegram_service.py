@@ -6,7 +6,7 @@ from pathlib import Path
 
 import requests
 
-from utils.env_config import EnvConfig
+from services.telegram_connection import TelegramConnection
 
 logger = logging.getLogger(__name__)
 
@@ -23,18 +23,12 @@ class TelegramService:
     RETRY_BACKOFF_SECONDS = 5
 
     def __init__(self, bot_token: str, chat_id: str):
-        if not bot_token or not chat_id:
-            raise ValueError("Telegram bot token and chat ID are required")
-        self._bot_token = bot_token
-        self._chat_id = chat_id
+        self._connection = TelegramConnection(bot_token=bot_token, chat_id=chat_id)
 
     @classmethod
     def from_environment(cls) -> "TelegramService":
-        token = (EnvConfig.env("TELEGRAM_BOT_TOKEN") or "").strip()
-        chat_id = (EnvConfig.env("TELEGRAM_CHAT_ID") or "").strip()
-        if not token or not chat_id:
-            raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID app setting")
-        return cls(bot_token=token, chat_id=chat_id)
+        connection = TelegramConnection.from_environment()
+        return cls(bot_token=connection.bot_token, chat_id=connection.chat_id)
 
     def send_document(self, zip_path: Path, caption: str) -> int:
         """Send a ZIP; return the Telegram message ID on success."""
@@ -48,14 +42,14 @@ class TelegramService:
                 f"{self.MAX_DOCUMENT_BYTES:,}-byte Telegram limit"
             )
 
-        url = f"https://api.telegram.org/bot{self._bot_token}/sendDocument"
+        url = self._connection.send_document_url
 
         for attempt in range(1, self.MAX_SEND_ATTEMPTS + 1):
             try:
                 with zip_path.open("rb") as archive:
                     response = requests.post(
                         url,
-                        data={"chat_id": self._chat_id, "caption": caption[:1024]},
+                        data={"chat_id": self._connection.chat_id, "caption": caption[:1024]},
                         files={
                             "document": (
                                 zip_path.name,
@@ -80,13 +74,13 @@ class TelegramService:
                 time.sleep(self.RETRY_BACKOFF_SECONDS * attempt)
 
     def send_message(self, text: str) -> int:
-        url = f"https://api.telegram.org/bot{self._bot_token}/sendMessage"
+        url = self._connection.send_message_url
 
         for attempt in range(1, self.MAX_SEND_ATTEMPTS + 1):
             try:
                 response = requests.post(
                     url,
-                    data={"chat_id": self._chat_id, "text": text},
+                    data={"chat_id": self._connection.chat_id, "text": text},
                     timeout=(30, 60),
                 )
                 return self._message_id(response, "message")
@@ -113,7 +107,7 @@ class TelegramService:
         if response.status_code != 200 or payload.get("ok") is not True:
             description = str(payload.get("description", "Unknown Telegram error"))
             # Redact token defensively even if a remote error mentions it.
-            description = description.replace(self._bot_token, "[REDACTED]")
+            description = self._connection.redact(description)
             raise TelegramUploadError(
                 f"Telegram rejected {kind} (HTTP {response.status_code}): "
                 f"{description}"
