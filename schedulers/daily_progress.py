@@ -11,7 +11,7 @@ from typing import Optional
 
 from azure.core.exceptions import ResourceNotFoundError
 
-from utils.blob_utils import BlobSync, BlobUtils
+from utils.blob_utils import BlobUtils
 
 logger = logging.getLogger(__name__)
 
@@ -24,20 +24,23 @@ class DailyProgress:
     MAX_ATTEMPTS = 3
     BLOB_PREFIX = "daily_progress"
 
-    def __init__(self, run_key: str, container: Optional[str] = None, local_dir: Optional[str] = None):
+    def __init__(self, run_key: str, container: Optional[str] = None, local_dir: Optional[str] = None, *, strict: bool = False):
         self.run_key = run_key
         self._container = container
+        self._strict = strict
         self._is_local = BlobUtils.is_running_locally()
         self._local_path = Path(local_dir or "local_data") / self.BLOB_PREFIX / f"{run_key}.json"
         self._blob_name = f"{self.BLOB_PREFIX}/{run_key}.json"
-        self._blob_sync: Optional[BlobSync] = None
+        self._container_client = None
         self.tasks: dict[str, object] = {}
         self._load()
 
     def _blob(self):
-        if self._blob_sync is None:
-            self._blob_sync = BlobSync()
-        container = self._blob_sync.get_container(self._container or BlobUtils.market_data_cache_blob())
+        if self._container_client is None:
+            self._container_client = BlobUtils.get_container_client(self._container or BlobUtils.market_data_cache_blob())
+        container = self._container_client
+        if container is None and self._strict:
+            raise RuntimeError("No storage connection; cannot persist scheduler progress")
         return container.get_blob_client(self._blob_name) if container else None
 
     def _load(self) -> None:
@@ -50,12 +53,16 @@ class DailyProgress:
         except ResourceNotFoundError:
             raw = None
         except Exception:
+            if self._strict:
+                raise
             logger.exception("[DailyProgress] Could not read progress %s; starting from scratch", self.run_key)
             raw = None
         if raw:
             try:
                 self.tasks = dict(json.loads(raw).get("tasks", {}))
             except Exception:
+                if self._strict:
+                    raise
                 logger.exception("[DailyProgress] Progress %s is unreadable; starting from scratch", self.run_key)
 
     def save(self) -> None:
@@ -69,6 +76,8 @@ class DailyProgress:
             if blob:
                 blob.upload_blob(payload.encode(), overwrite=True)
         except Exception:
+            if self._strict:
+                raise
             logger.exception("[DailyProgress] Could not save progress %s", self.run_key)
 
     def is_finished(self, task: str) -> bool:

@@ -1,7 +1,7 @@
 import logging
 import fnmatch
 import math
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import azure.functions as func
 
@@ -21,6 +21,7 @@ from app_settings import (
 )
 
 app = func.FunctionApp()
+logging.info("Function app started; TEST_MODE=%s", TEST_MODE)
 
 @app.route(
     route="health",
@@ -28,6 +29,7 @@ app = func.FunctionApp()
     auth_level=func.AuthLevel.ANONYMOUS
 )
 def health(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("[health] called: %s %s", req.method, req.url)
     return func.HttpResponse(
         body='{"status":"ok","service":"market-data-func"}',
         status_code=200,
@@ -48,9 +50,16 @@ TEST_MODE_ONCE_CRON = "0 0 0 1 1 *"
 DAILY_JOB_CRON = TEST_MODE_ONCE_CRON if TEST_MODE else "0 0,10,20,30,40 3 * * 1-5"
 DAILY_JOB_TIME_BUDGET_SECONDS = float(EnvConfig.env("DAILY_JOB_TIME_BUDGET_SECONDS", "480") or "480")
 
+def _test_mode_backup_cron() -> str:
+    """One-shot NCRONTAB (UTC) for the minute after the TEST_MODE window ends."""
+    expiry = EnvConfig.get_test_mode_expiry()
+    if expiry is None:
+        return TEST_MODE_ONCE_CRON
+    fire_at = (expiry.astimezone(timezone.utc) + timedelta(minutes=1)).replace(second=0, microsecond=0)
+    return f"0 {fire_at.minute} {fire_at.hour} {fire_at.day} {fire_at.month} *"
+
 # 11:30 UTC = 17:00 IST, after market close; DailyScheduler.run_backup skips holidays and weekends itself.
-# In TEST_MODE it polls every minute; run_backup waits for the TEST_MODE window to end, then runs once per app start.
-BACKUP_JOB_CRON = "0 * * * * *" if TEST_MODE else "0 30 11 * * 1-5"
+BACKUP_JOB_CRON = _test_mode_backup_cron() if TEST_MODE else "0 30 11 * * 1-5"
 
 if ENABLE_BACKGROUND_TRIGGERS:
     @app.schedule(
@@ -60,6 +69,7 @@ if ENABLE_BACKGROUND_TRIGGERS:
         use_monitor=False,
     )
     def daily_job(dailyTimer: func.TimerRequest) -> None:
+        logging.info("[daily_job] triggered")
         try:
             complete = DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run(
                 time_budget_seconds=DAILY_JOB_TIME_BUDGET_SECONDS
@@ -75,6 +85,7 @@ if ENABLE_BACKGROUND_TRIGGERS:
         use_monitor=True,
     )
     def daily_market_backup(backupTimer: func.TimerRequest) -> None:
+        logging.info("[daily_market_backup] triggered")
         try:
             ok = DailyScheduler(history_days=HISTORY_DAYS, history_interval=HISTORY_INTERVAL).run_backup()
             logging.info(f"[daily_market_backup] finished; backup ok: {ok}")
@@ -91,6 +102,7 @@ if ENABLE_BACKGROUND_TRIGGERS:
             use_monitor=False,
         )
         def option_chain_fetcher(chainTimer: func.TimerRequest) -> None:
+            logging.info("[option_chain_fetcher] triggered")
             if TEST_MODE:
                 # One-shot run: fetch every batch once instead of only the batch for the current second.
                 target_seconds = list(range(math.ceil(len(OPTION_CHAIN_SYMBOLS) / PARALLEL_BATCH_SIZE)))

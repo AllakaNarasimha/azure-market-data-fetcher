@@ -31,7 +31,8 @@ HISTORY_INTERVAL = EnvConfig.history_interval()
 PARALLEL_BATCH_SIZE = int(EnvConfig.env("PARALLEL_BATCH_SIZE", "5") or "5")
 
 _option_chain_weekday_field = "*" if TEST_MODE else "1-5"
-_option_chain_hour_field = "*" if TEST_MODE else "9-16"
+# Azure timer hours default to UTC, so keep this window aligned with IST market hours.
+_option_chain_hour_field = "*" if TEST_MODE else "3-10"
 
 DYNAMIC_OPTION_CHAIN_CRON = calculate_dynamic_option_chain_cron(
     len(OPTION_CHAIN_SYMBOLS), PARALLEL_BATCH_SIZE, weekday_field=_option_chain_weekday_field, hour_field=_option_chain_hour_field

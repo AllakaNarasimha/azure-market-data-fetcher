@@ -255,9 +255,13 @@ class DhanTOTPAuthenticator:
                 headers={"access-token": access_token},
                 timeout=10,
             )
-            return resp.status_code == 200
-        except Exception:
+        except Exception as exc:
+            logger.warning("Dhan token validation request failed: %s", exc)
             return False
+        if resp.status_code != 200:
+            logger.warning("Dhan token validation rejected: status=%s", resp.status_code)
+            return False
+        return True
 
     def get_access_token(self, force: bool = False) -> str:
         gate = self._gate
@@ -278,6 +282,7 @@ class DhanTOTPAuthenticator:
                 token, expiry_time, totp = self._login()
             except Exception as exc:
                 gate.record_failure(exc)
+                logger.error("Dhan login failed: %s", exc)
                 raise
             gate.remember(token)
 
@@ -444,9 +449,13 @@ class FyersTOTPAuthenticator:
                 headers={"Authorization": f"{self.config.app_id}:{raw_token}"},
                 timeout=10,
             )
-            return resp.status_code == 200 and (resp.json() or {}).get("s") == "ok"
-        except Exception:
+            valid = resp.status_code == 200 and (resp.json() or {}).get("s") == "ok"
+        except Exception as exc:
+            logger.warning("Fyers token validation request failed: %s", exc)
             return False
+        if not valid:
+            logger.warning("Fyers token validation rejected: status=%s", resp.status_code)
+        return valid
 
     def get_access_token(self, force: bool = False) -> str:
         gate = self._gate
@@ -459,6 +468,9 @@ class FyersTOTPAuthenticator:
                     if candidate and self._is_valid(candidate):
                         gate.remember(candidate)
                         raw_token = candidate
+                        logger.info("Fyers: reused cached access token")
+                    else:
+                        logger.info("Fyers: no valid cached token; starting TOTP login")
                 if raw_token:
                     return f"{self.config.app_id}:{raw_token}"
 
@@ -468,8 +480,10 @@ class FyersTOTPAuthenticator:
                 raw_token = self._exchange_code(auth_code)
             except Exception as exc:
                 gate.record_failure(exc)
+                logger.error("Fyers login failed: %s", exc)
                 raise
             gate.remember(raw_token)
+            logger.info("Fyers: access token issued")
 
         TokenCache().save("fyers", {"accessToken": raw_token})
         return f"{self.config.app_id}:{raw_token}"
