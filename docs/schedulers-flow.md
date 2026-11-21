@@ -59,8 +59,7 @@ flowchart TD
     C -- yes --> Z
     C -- no --> D{Not TEST_MODE and<br/>holiday?}
     D -- yes --> D1[Cleanup old broker-master folders] --> Z
-    D -- no --> E[Ensure blob container]
-    E --> F[Load watchlist and option-chain symbols]
+    D -- no --> F[Load watchlist and option-chain symbols]
     F --> G[Build context / pick cache root]
     G --> H[Load DailyProgress<br/>list pending tasks]
     H --> I{Anything pending?}

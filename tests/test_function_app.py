@@ -278,57 +278,6 @@ def test_daily_prefetch_logs_warning_when_no_expiries(monkeypatch, caplog, marke
     assert len(warnings) >= 1
 
 
-def test_container_create_is_requested_once_per_process(monkeypatch):
-    from azure.core.exceptions import ResourceExistsError
-    from utils import blob_utils
-
-    created = []
-
-    class FakeContainer:
-        def __init__(self, name):
-            self.name = name
-
-        def create_container(self):
-            created.append(self.name)
-            raise ResourceExistsError("exists")
-
-    class FakeService:
-        def get_container_client(self, name):
-            return FakeContainer(name)
-
-    monkeypatch.setattr(blob_utils.BlobServiceClient, "from_connection_string", staticmethod(lambda conn: FakeService()))
-    monkeypatch.setattr(blob_utils.BlobUtils, "_ensured_containers", set())
-
-    for _ in range(3):
-        blob_utils.BlobUtils.get_container_client("cache-a", "conn")
-    blob_utils.BlobUtils.get_container_client("cache-b", "conn")
-
-    assert created == ["cache-a", "cache-b"]
-
-
-def test_container_create_is_retried_after_unexpected_failure(monkeypatch):
-    from utils import blob_utils
-
-    attempts = []
-
-    class FakeContainer:
-        def create_container(self):
-            attempts.append(1)
-            raise RuntimeError("transient")
-
-    class FakeService:
-        def get_container_client(self, name):
-            return FakeContainer()
-
-    monkeypatch.setattr(blob_utils.BlobServiceClient, "from_connection_string", staticmethod(lambda conn: FakeService()))
-    monkeypatch.setattr(blob_utils.BlobUtils, "_ensured_containers", set())
-
-    blob_utils.BlobUtils.get_container_client("cache-a", "conn")
-    blob_utils.BlobUtils.get_container_client("cache-a", "conn")
-
-    assert len(attempts) == 2
-
-
 def _fyers_auth_with_counters(monkeypatch, login_error=None):
     import brokers.broker_authenticate as ba
 
@@ -428,42 +377,6 @@ def test_fyers_exchange_trims_secret_and_hints_on_hash_mismatch(monkeypatch):
     assert sent["appIdHash"] == hashlib.sha256(b"ABCDE12345-100:SECRET0001").hexdigest()
     assert "app id and app secret do not match" in str(exc.value)
     assert "SECRET0001" not in str(exc.value)
-
-
-def test_upload_not_found_clears_container_memo_so_it_is_recreated(monkeypatch):
-    from unittest.mock import MagicMock
-    from azure.core.exceptions import ResourceNotFoundError
-    from utils import blob_utils
-
-    created = []
-
-    class FakeContainer:
-        def create_container(self):
-            created.append(1)
-
-    class FakeService:
-        def get_container_client(self, name):
-            return FakeContainer()
-
-    monkeypatch.setattr(blob_utils.BlobServiceClient, "from_connection_string", staticmethod(lambda conn: FakeService()))
-    monkeypatch.setattr(blob_utils.BlobUtils, "_ensured_containers", set())
-    monkeypatch.setattr(blob_utils.BlobUtils, "is_running_locally", staticmethod(lambda: False))
-
-    blob_utils.BlobUtils.get_container_client("broker-tokens", "conn")
-    blob_utils.BlobUtils.get_container_client("broker-tokens", "conn")
-    assert len(created) == 1
-
-    primary = MagicMock()
-    primary.get_blob_client.return_value.upload_blob.side_effect = ResourceNotFoundError("ContainerNotFound")
-    sync = blob_utils.BlobSync.__new__(blob_utils.BlobSync)
-    sync._connection_string = "conn"
-    sync._is_running_locally = False
-    sync._containers = {"broker-tokens": primary}
-
-    assert sync.upload_content("broker-tokens", "fyers.json", b"{}") is False
-
-    blob_utils.BlobUtils.get_container_client("broker-tokens", "conn")
-    assert len(created) == 2
 
 
 def test_token_cache_save_uses_fallback_upload_so_missing_container_is_recreated(monkeypatch):
