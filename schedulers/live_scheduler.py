@@ -21,8 +21,19 @@ class LiveScheduler:
         self.months = months
         self.max_concurrency = max_concurrency
 
+    @staticmethod
+    def _can_collect() -> bool:
+        now = datetime.now(pytz.timezone(MarketTimes.timezone()))
+        return is_market_open(now, MarketCalendar.is_holiday) and (
+            not EnvConfig.test_mode() or EnvConfig.is_test_mode_active(now)
+        )
+
     def run(self, symbols: list[str] | None = None, batch_second: int | None = None) -> None:
         IST_TZ = pytz.timezone(MarketTimes.timezone())
+        now = datetime.now(IST_TZ)
+        if not self._can_collect():
+            logging.info("[LiveScheduler] Collection window closed; skipping option-chain fetch")
+            return
         # Respect TEST_MODE/test-cache decision inside downstream helpers where needed
         if batch_second is None:
             try:
@@ -40,18 +51,11 @@ class LiveScheduler:
 
         target_symbols = symbols if symbols is not None else EnvConfig.option_chain_symbols()
 
-        # Route to the test-mode cache root/container when TEST_MODE is active
-        # and the market is closed/holiday, so after-hours test runs don't
-        # pollute the production market-data-cache container.
-        now = datetime.now(IST_TZ)
         ctx = build_scheduler_context(now, MarketCalendar.is_holiday, BlobUtils.is_running_locally())
-        if not is_market_open(now, MarketCalendar.is_holiday) and not ctx.use_test_cache:
-            logging.info("[LiveScheduler] Market is closed or holiday; skipping option-chain fetch")
-            return
 
         chain_cache = OptionChainCacheManager(cache_dir=ctx.test_cache_root if ctx.use_test_cache else None)
         if ctx.use_test_cache:
-            logging.info("[LiveScheduler] TEST_MODE after-hours: writing cache to %s", ctx.test_cache_root)
+            logging.info("[LiveScheduler] TEST_MODE: writing cache to %s", ctx.test_cache_root)
 
         asyncio.run(self._run_async(target_symbols, chain_cache, batch_second))
 
@@ -60,6 +64,8 @@ class LiveScheduler:
 
         async def _process_symbol(symbol: str) -> None:
             async with semaphore:
+                if not self._can_collect():
+                    return
                 try:
                     instrument = await asyncio.to_thread(bdm.InstrumentResolver.resolve, symbol)
                 except Exception as ex:
@@ -73,6 +79,8 @@ class LiveScheduler:
                     return
 
                 for broker_name, manager in brokers_for_symbol:
+                    if not self._can_collect():
+                        return
                     try:
                         await asyncio.to_thread(
                             self._fetch_option_chain_range, manager, broker_name, instrument, chain_cache, batch_second
@@ -124,6 +132,8 @@ class LiveScheduler:
 
         responses: list[tuple] = []
         for expiry_ts in expiry_list:
+            if not self._can_collect():
+                break
             try:
                 chain = manager.get_option_chain(instrument, strikecount=self.strikecount, expiries=expiry_ts)
                 responses.append((chain, expiry_ts))

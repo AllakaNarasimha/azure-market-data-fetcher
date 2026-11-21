@@ -40,6 +40,24 @@ class BlobUtils:
     @staticmethod
     def test_mode_cache_blob() -> str:
         return EnvConfig.test_mode_cache_blob()
+
+    @staticmethod
+    def ensure_container(container_name: str) -> None:
+        conn_str = EnvConfig.market_storage_connection()
+        if not conn_str:
+            return
+        container_client = BlobServiceClient.from_connection_string(conn_str).get_container_client(container_name)
+        if container_client.exists():
+            logger.info("Container '%s' found", container_name)
+            return
+        try:
+            container_client.create_container()
+            logger.info("Container '%s' not found; created", container_name)
+        except ResourceExistsError:
+            pass
+        except Exception:
+            logger.exception("Failed to create container '%s'", container_name)
+
     @staticmethod
     def is_running_locally() -> bool:
         return EnvConfig.website_site_name() is None
@@ -127,7 +145,9 @@ class BlobSync:
         self._test_container_client = None
         if self.is_running_live:
             self._container_client = self.get_container(BlobUtils.market_data_cache_blob())
-            self._test_container_client = self.get_container(BlobUtils.test_mode_cache_blob())
+            # Only create the test-mode container when TEST_MODE is actually enabled
+            if EnvConfig.test_mode():
+                self._test_container_client = self.get_container(BlobUtils.test_mode_cache_blob())
             if not self._container_client:
                 self.is_running_live = False
         logger.info(
@@ -441,6 +461,10 @@ class BlobSync:
         BlobUtils.forget_container(container_name, self._connection_string)
         logger.info("[BLOB SYNC] Deleted container '%s'", container_name)
         return True
+
+    def container_exists(self, container_name: str) -> bool:
+        container_client = self.get_container(container_name)
+        return bool(container_client and container_client.exists())
 
     def _require_container(self, container_name: str) -> ContainerClient:
         container_client = self.get_container(container_name)

@@ -61,6 +61,9 @@ class MarketDataBackupService:
         """Delete the backed-up container; call only after `run()` succeeded."""
         return self._blob_sync.delete_container(self.container_name)
 
+    def source_container_exists(self) -> bool:
+        return self._blob_sync.container_exists(self.container_name)
+
     def notify_container_deleted(self, result: BackupResult) -> int:
         now = datetime.now(pytz.timezone(MarketTimes.timezone()))
         return TelegramService.from_environment().send_message(
