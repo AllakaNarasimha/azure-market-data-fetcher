@@ -16,6 +16,7 @@ import pytz
 
 from services.telegram_service import TelegramService
 from utils.blob_utils import BlobSync, BlobUtils
+from utils.env_config import EnvConfig
 from utils.market_times import MarketTimes
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,7 @@ class MarketDataBackupService:
             delivered = f"Backup message ID(s): {', '.join(str(i) for i in result.telegram_message_ids)}"
         return TelegramService.from_environment().send_message(
             f"{outcome}\n"
+            f"Source: {EnvConfig.source_label()}\n"
             f"Container: {self.container_name}\n"
             f"Date: {now:%Y-%m-%d %H:%M:%S} {now.tzname()}\n"
             f"Total backed-up blobs (market data and broker masters): {result.blob_count}\n"
@@ -185,6 +187,7 @@ class MarketDataBackupService:
         for index, part_path in enumerate(parts, start=1):
             caption = (
                 f"Market data and broker master backup: {', '.join(containers)}\n"
+                f"Source: {EnvConfig.source_label()}\n"
                 f"Date: {now:%Y-%m-%d %H:%M} {now.tzname()}\n"
                 f"Blobs: {result.blob_count} | ZIP: {result.zip_bytes:,} bytes"
             )
@@ -271,7 +274,7 @@ class MarketDataBackupService:
     def _send_alert(telegram: TelegramService, text: str) -> None:
         """Best-effort Telegram text alert; a failure here is only logged."""
         try:
-            telegram.send_message(text)
+            telegram.send_message(f"Source: {EnvConfig.source_label()}\n{text}")
         except Exception:
             logger.exception("[Backup] Failure alert could not be sent")
 

@@ -84,6 +84,13 @@ class EnvConfig:
         return cls.env("ENVIRONMENT", "prod") or "prod"
 
     @classmethod
+    def source_label(cls) -> str:
+        """Human-readable origin of this app, e.g. 'prod', 'dev-test (market-data-func)'."""
+        label = cls.environment() + ("-test" if cls.test_mode() else "")
+        site = cls.website_site_name()
+        return f"{label} ({site})" if site else label
+
+    @classmethod
     def market_storage_connection(cls) -> Optional[str]:
         return cls.env("MARKET_STORAGE_CONNECTION")
 

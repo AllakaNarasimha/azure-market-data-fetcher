@@ -219,3 +219,20 @@ def test_zip_failure_sends_alert(monkeypatch):
         MarketDataBackupService(container_name="market", blob_sync=sync).run()
 
     assert "ZIP creation failed" in telegram.messages[0]
+
+
+def test_source_label_in_caption_and_alert(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "dev")
+    monkeypatch.setenv("TEST_MODE", "true")
+    monkeypatch.delenv("WEBSITE_SITE_NAME", raising=False)
+    captions = []
+    telegram = FakeTelegram()
+    telegram.send_document = lambda path, caption: captions.append(caption) or 7
+    sync = FakeBlobSync({"market": ["a.csv"], BlobUtils.BROKER_DATA_BLOB: ["b.csv"]})
+    monkeypatch.setattr(svc.TelegramService, "from_environment", classmethod(lambda cls: telegram))
+
+    MarketDataBackupService(container_name="market", blob_sync=sync).run()
+    MarketDataBackupService._send_alert(telegram, "hello")
+
+    assert "Source: dev-test" in captions[0]
+    assert telegram.messages[0].startswith("Source: dev-test\n")
