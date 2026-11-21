@@ -51,10 +51,20 @@ class BackupResult:
     fallback_blob: Optional[str] = None  # Set when Telegram failed and the ZIP went to FAILED_BACKUP_CONTAINER.
 
 
+TRIGGER_TIMER = "scheduled timer"
+TRIGGER_FORCED = "forced (FORCE_BACKUP_ID)"
+
+
 class MarketDataBackupService:
     """Back up market data and broker masters; cleanup targets only market data."""
 
-    def __init__(self, container_name: Optional[str] = None, blob_sync: Optional[BlobSync] = None) -> None:
+    def __init__(
+        self,
+        container_name: Optional[str] = None,
+        blob_sync: Optional[BlobSync] = None,
+        trigger: str = TRIGGER_TIMER,
+    ) -> None:
+        self.trigger = trigger
         self.container_name = container_name or BlobUtils.market_data_cache_blob()
         self._blob_sync = blob_sync or BlobSync()
 
@@ -109,6 +119,7 @@ class MarketDataBackupService:
         return TelegramService.from_environment().send_message(
             f"{outcome}\n"
             f"Source: {EnvConfig.source_label()}\n"
+            f"Trigger: {self.trigger}\n"
             f"Container: {containers}\n"
             f"Date: {now:%Y-%m-%d %H:%M:%S} {now.tzname()}\n"
             f"Total backed-up blobs (market data and broker masters): {result.blob_count}\n"
@@ -204,6 +215,7 @@ class MarketDataBackupService:
             caption = (
                 f"Market data and broker master backup: {', '.join(containers)}\n"
                 f"Source: {EnvConfig.source_label()}\n"
+                f"Trigger: {self.trigger}\n"
                 f"Date: {now:%Y-%m-%d %H:%M} {now.tzname()}\n"
                 f"Blobs: {result.blob_count} | ZIP: {result.zip_bytes:,} bytes"
             )
@@ -286,11 +298,10 @@ class MarketDataBackupService:
         logger.error("[Backup] ZIP saved to %s/%s after Telegram failure", FAILED_BACKUP_CONTAINER, blob_name)
         return blob_name
 
-    @staticmethod
-    def _send_alert(telegram: TelegramService, text: str) -> None:
+    def _send_alert(self, telegram: TelegramService, text: str) -> None:
         """Best-effort Telegram text alert; a failure here is only logged."""
         try:
-            telegram.send_message(f"Source: {EnvConfig.source_label()}\n{text}")
+            telegram.send_message(f"Source: {EnvConfig.source_label()}\nTrigger: {self.trigger}\n{text}")
         except Exception:
             logger.exception("[Backup] Failure alert could not be sent")
 

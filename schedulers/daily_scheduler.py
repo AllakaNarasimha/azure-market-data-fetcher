@@ -15,7 +15,12 @@ from schedulers.daily_progress import DailyProgress, STATUS_DONE
 from schedulers.market_calendar import MarketCalendar
 from schedulers.scheduler_utils import build_scheduler_context, is_test_mode
 from schedulers.live_scheduler import LiveScheduler
-from services.market_data_backup_service import MarketDataBackupService, NothingToBackUpError
+from services.market_data_backup_service import (
+    MarketDataBackupService,
+    NothingToBackUpError,
+    TRIGGER_FORCED,
+    TRIGGER_TIMER,
+)
 
 
 class DailyBudgetExceeded(Exception):
@@ -167,20 +172,46 @@ class DailyScheduler:
         else:
             run_key = f"{now:%Y-%m-%d}_live_backup"
         progress = DailyProgress(run_key, container="scheduler-state", strict=True)
+        return self._backup_container(progress, container)
+
+    def run_forced_backup(self) -> bool:
+        """Back up the live container once per FORCE_BACKUP_ID, on any day (holiday or not); a restart with the same ID is a no-op.
+
+        Ignored in TEST_MODE, which has its own backup. The container is kept unless FORCE_BACKUP_DELETE=true.
+        Returns True when nothing is left to do for this ID.
+        """
+        force_id = EnvConfig.force_backup_id()
+        if not force_id:
+            return True
+        if EnvConfig.test_mode():
+            logging.info("[DailyScheduler] FORCE_BACKUP_ID ignored: TEST_MODE has its own backup")
+            return True
+        progress = DailyProgress(f"force_backup_{force_id}", container="scheduler-state", strict=True)
+        self._forced = True
+        return self._backup_container(
+            progress, BlobUtils.market_data_cache_blob(), delete=EnvConfig.force_backup_delete()
+        )
+
+    def _backup_service(self, container: str) -> MarketDataBackupService:
+        trigger = TRIGGER_FORCED if getattr(self, "_forced", False) else TRIGGER_TIMER
+        return MarketDataBackupService(container_name=container, trigger=trigger)
+
+    def _backup_container(self, progress, container: str, delete: bool = True) -> bool:
+        """Back up `container` once per `progress` record, then delete it when `delete` allows. True when done or empty."""
         task = f"backup:{container}"
         delete_task = f"delete:{container}"
         if progress.is_finished(task):
             logging.info("[DailyScheduler] Backup already handled for %s; checking deletion only", progress.run_key)
             success = progress.tasks.get(task) == STATUS_DONE
-            if success:
+            if success and delete:
                 self._delete_backed_up_container(progress, delete_task, container, result=None)
             return success
 
         progress.record(task, False)
         try:
-            result = MarketDataBackupService(container_name=container).run()
+            result = self._backup_service(container).run()
         except NothingToBackUpError:
-            self._retire_empty_container(progress, task, delete_task, container)
+            self._retire_empty_container(progress, task, delete_task, container, delete)
             return True
         except Exception as ex:
             logging.exception(f"[DailyScheduler] Backup failed for container {container}: {ex!r}")
@@ -194,7 +225,8 @@ class DailyScheduler:
             # Leaves a trace in the day's record: the only copy is in backup-failed, not Telegram.
             progress.note(f"fallback:{container}", result.fallback_blob)
         progress.record(task, True)
-        self._delete_backed_up_container(progress, delete_task, container, result=result)
+        if delete:
+            self._delete_backed_up_container(progress, delete_task, container, result=result)
         return True
 
     @staticmethod
@@ -210,18 +242,19 @@ class DailyScheduler:
                 result.container, result.blob_count, result.zip_bytes, result.telegram_message_ids,
             )
 
-    def _retire_empty_container(self, progress, task: str, delete_task: str, container: str) -> None:
+    def _retire_empty_container(self, progress, task: str, delete_task: str, container: str, delete: bool = True) -> None:
         # Nothing to lose: an empty container is not a failure, so retiring it needs no retries or alert.
         logging.warning("[DailyScheduler] Container %s is empty; nothing to back up", container)
         progress.record(task, True)
-        self._delete_backed_up_container(progress, delete_task, container, result=None, empty=True)
+        if delete:
+            self._delete_backed_up_container(progress, delete_task, container, result=None, empty=True)
 
     def _delete_backed_up_container(self, progress, delete_task: str, container: str, result, empty: bool = False) -> None:
         """Delete the backed-up container once. A restart (result None) may delete only in TEST_MODE; an empty one always may."""
         if result is None and not empty and not self._test_mode(datetime.now(pytz.timezone(MarketTimes.timezone()))):
             logging.info("[DailyScheduler] Container deletion skipped: no backup in this run; container=%s", container)
             return
-        backup_service = MarketDataBackupService(container_name=container)
+        backup_service = self._backup_service(container)
         if progress.is_finished(delete_task):
             if not backup_service.source_container_exists():
                 logging.info("[DailyScheduler] Container already deleted; container=%s", container)
