@@ -1,3 +1,4 @@
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from services import market_data_backup_service as svc
 from services.market_data_backup_service import MarketDataBackupService
 from utils.blob_utils import BlobUtils
+from utils.env_config import EnvConfig
 
 
 class FakeBlobSync:
@@ -199,6 +201,7 @@ def test_partial_split_upload_alert_states_parts_received(monkeypatch):
 
     telegram = PartialTelegram()
     telegram.MAX_DOCUMENT_BYTES = 10
+    monkeypatch.setattr(svc, "PART_PAUSE_SECONDS", 0)
     failed = FakeFailedContainer()
     service = _service(monkeypatch, {"market": ["a.csv"], BlobUtils.BROKER_DATA_BLOB: ["b.csv"]}, telegram, failed)
 
@@ -208,6 +211,38 @@ def test_partial_split_upload_alert_states_parts_received(monkeypatch):
     assert "1 of" in telegram.messages[0]
     assert "ONLY copy" in telegram.messages[0]
     assert "incomplete" in telegram.messages[0]
+
+
+def test_telegram_part_bytes_accepts_units_and_falls_back(monkeypatch):
+    def part_bytes(value):
+        monkeypatch.setattr(EnvConfig, "_overrides", {"TELEGRAM_PART_BYTES": value})
+        return EnvConfig.telegram_part_bytes()
+
+    assert part_bytes("1MB") == 1024 * 1024
+    assert part_bytes("512 kb") == 512 * 1024
+    assert part_bytes("1.5MB") == 1536 * 1024
+    assert part_bytes("2500") == 2500
+    assert part_bytes("") == 5 * 1024 * 1024
+    assert part_bytes("abc") == 5 * 1024 * 1024
+
+
+def test_zip_is_split_by_telegram_part_bytes_setting(monkeypatch, tmp_path):
+    monkeypatch.setattr(EnvConfig, "_overrides", {"TELEGRAM_PART_BYTES": "1000"})
+    monkeypatch.setattr(svc, "PART_PAUSE_SECONDS", 0)
+    zip_path = tmp_path / "backup.zip"
+    zip_path.write_bytes(b"x" * 2500)
+    sent, captions = [], []
+    telegram = FakeTelegram()
+    telegram.send_document = lambda path, caption: sent.append(path.stat().st_size) or captions.append(caption) or len(sent)
+    service = MarketDataBackupService(container_name="market", blob_sync=SimpleNamespace())
+    result = SimpleNamespace(blob_count=1, zip_bytes=2500)
+
+    ids = service._send_to_telegram(telegram, zip_path, ["market"], datetime.now(), result)
+
+    assert sent == [1000, 1000, 500]
+    assert len(ids) == 3
+    assert all(len(caption) <= 1024 for caption in captions)
+    assert "copy /b backup.zip.part-* backup.zip" in captions[0]
 
 
 def test_zip_failure_sends_alert(monkeypatch):

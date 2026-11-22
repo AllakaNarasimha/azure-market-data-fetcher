@@ -34,6 +34,10 @@ With `TEST_MODE=false`, setting `FORCE_BACKUP_ID=<value>` makes the next app sta
 - Ignored when `TEST_MODE=true`.
 - Set it after 16:00 IST so the day's data is complete.
 
+## Telegram upload parts
+
+The backup ZIP is sent in parts of at most `TELEGRAM_PART_BYTES` (default `5MB`; accepts `512KB`, `8MB` or plain bytes, 1024-based; always capped at Telegram's 49 MB limit), with a 4 s pause between parts to stay under Telegram's group rate limit. Small parts survive dropped connections that big uploads do not. Each part's caption explains how to join the parts. If any part fails, the whole ZIP is saved to `backup-failed`.
+
 ## Overview
 
 ```mermaid

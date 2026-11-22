@@ -53,6 +53,7 @@ class BackupResult:
 
 TRIGGER_TIMER = "scheduled timer"
 TRIGGER_FORCED = "forced (FORCE_BACKUP_ID)"
+PART_PAUSE_SECONDS = 4
 
 
 class MarketDataBackupService:
@@ -205,13 +206,15 @@ class MarketDataBackupService:
     def _send_to_telegram(
         self, telegram: TelegramService, zip_path: Path, containers: list[str], now: datetime, result: BackupResult
     ) -> tuple[int, ...]:
-        """Send the ZIP (split into parts when over Telegram's limit); returns the message ids."""
-        parts = self._split_for_telegram(zip_path, telegram.MAX_DOCUMENT_BYTES)
+        """Send the ZIP in parts of at most TELEGRAM_PART_BYTES; returns the message ids."""
+        parts = self._split_for_telegram(zip_path, min(EnvConfig.telegram_part_bytes(), telegram.MAX_DOCUMENT_BYTES))
         if len(parts) > 1:
-            logger.info("[Backup] ZIP exceeds Telegram limit; split into %d parts", len(parts))
+            logger.info("[Backup] ZIP split into %d parts for Telegram", len(parts))
 
         message_ids = []
         for index, part_path in enumerate(parts, start=1):
+            if index > 1:
+                time.sleep(PART_PAUSE_SECONDS)  # Telegram allows about 20 messages a minute to a group.
             caption = (
                 f"Market data and broker master backup: {', '.join(containers)}\n"
                 f"Source: {EnvConfig.source_label()}\n"
@@ -220,12 +223,12 @@ class MarketDataBackupService:
                 f"Blobs: {result.blob_count} | ZIP: {result.zip_bytes:,} bytes"
             )
             if len(parts) > 1:
-                part_names = "+".join(p.name for p in parts)
+                # Wildcards keep the caption short; with many parts a name list would pass Telegram's 1024-char caption limit.
                 caption += (
                     f"\nPart {index}/{len(parts)} of split archive: {part_path.name}\n\n"
                     f"How to combine after downloading all parts:\n\n"
                     f"Windows (Command Prompt):\n"
-                    f"copy /b {part_names} {zip_path.name}\n\n"
+                    f"copy /b {zip_path.name}.part-* {zip_path.name}\n\n"
                     f"Mac/Linux (Terminal):\n"
                     f"cat {zip_path.name}.part-* > {zip_path.name}\n"
                     f"unzip -t {zip_path.name}"

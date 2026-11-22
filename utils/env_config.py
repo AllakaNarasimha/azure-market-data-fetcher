@@ -191,6 +191,19 @@ class EnvConfig:
         return (cls.env("DELETE_AFTER_BACKUP", "false") or "").strip().lower() == "true"
 
     @classmethod
+    def telegram_part_bytes(cls) -> int:
+        """Largest Telegram upload part (env `TELEGRAM_PART_BYTES`), e.g. `5MB`, `512KB` or `1048576`. Default: 5MB.
+
+        Units are 1024-based. Small parts survive flaky outbound connections; the Telegram document limit still caps it.
+        """
+        default = 5 * 1024 * 1024
+        match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(B|KB|MB|GB)?", (cls.env("TELEGRAM_PART_BYTES", "") or "").strip(), re.IGNORECASE)
+        if not match:
+            return default
+        unit = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3}[(match.group(2) or "B").upper()]
+        return int(float(match.group(1)) * unit) or default
+
+    @classmethod
     def force_backup_id(cls) -> str:
         """One-off live backup token (env `FORCE_BACKUP_ID`); a new value triggers one more backup at the next start."""
         raw = (cls.env("FORCE_BACKUP_ID", "") or "").strip()
