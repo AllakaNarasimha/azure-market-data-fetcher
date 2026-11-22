@@ -38,6 +38,10 @@ class BlobUtils:
         return EnvConfig.market_data_cache_blob()
 
     @staticmethod
+    def candle_cache_blob() -> str:
+        return EnvConfig.candle_cache_blob()
+
+    @staticmethod
     def test_mode_cache_blob() -> str:
         return EnvConfig.test_mode_cache_blob()
 

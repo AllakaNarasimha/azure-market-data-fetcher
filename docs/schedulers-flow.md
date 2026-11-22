@@ -38,7 +38,11 @@ With `TEST_MODE=false`, setting `FORCE_BACKUP_ID=<value>` makes the next app sta
 
 The backup ZIP is sent in parts of at most `TELEGRAM_PART_BYTES` (default `5MB`; accepts `512KB`, `8MB` or plain bytes, 1024-based; always capped at Telegram's 49 MB limit), with a 4 s pause between parts to stay under Telegram's group rate limit. Small parts survive dropped connections that big uploads do not. Each part's caption explains how to join the parts. If any part fails, the whole ZIP is saved to `backup-failed`.
 
-After every successful backup a final status message is sent in the same format as the part captions (`Backup:`, `Source:`, `Trigger:`, `Date:`, `Blobs | ZIP`) ending with `Container-Deleted: true|false`. It is `false` when the container is kept (for example a forced run without `FORCE_BACKUP_DELETE=true`, `DELETE_AFTER_BACKUP=false`, or a failed deletion). If Telegram failed, the message also says the ZIP is only in `backup-failed`.
+After every successful backup a final status message is sent in the same format as the part captions (`Backup:`, `Source:`, `Trigger:`, `Date:`, `Blobs | ZIP`, then one `Blobs: <container> - n blobs, size` line per container) ending with `Container-Deleted: true|false`. It is `false` when the container is kept (for example a forced run without `FORCE_BACKUP_DELETE=true`, `DELETE_AFTER_BACKUP=false`, or a failed deletion). If Telegram failed, the message also says the ZIP is only in `backup-failed`.
+
+## Candle history cache
+
+Candles (`candles/symbol=.../part-0.parquet`) live in their own container, `CANDLE_CACHE_BLOB` (default `candle-cache`). The daily backup deletes `market-data-cache`, so keeping them there would force a full refetch every day. The candle container is never backed up or deleted. The gap registry (`registry/market_off_registry.parquet`) is scoped to the day, so it stays in `market-data-cache` and is cleared by the backup. Each daily run asks the cache which dates inside the `HISTORY_DAYS` window are missing (everything since the last run, plus any holes) and fetches only those. TEST_MODE keeps writing to its own test container. Option chains stay in `market-data-cache`; the daily job's `daily_progress` records go to `scheduler-state`, like the backup records.
 
 ## Overview
 
@@ -48,19 +52,75 @@ flowchart LR
         T1["daily_job<br/>cron: 0 0,10,20,30,40 3 * * 1-5<br/>UTC 03:00-03:40 | IST 08:30-09:10<br/>Duration 00:40<br/>Mon-Fri, EVERY 10 MIN<br/>stops when all symbols done or budget used<br/>(TEST_MODE: once at start)"]
         T2["option_chain_fetcher<br/>cron: 0-N * 3-10 * * 1-5<br/>UTC 03:00-10:59 | IST 08:30-16:29<br/>Duration 07:59<br/>Mon-Fri, EVERY MINUTE<br/>(collects only 09:15-16:00 IST = 03:45-10:30 UTC)<br/>(TEST_MODE: once at start)"]
         T3["daily_market_backup<br/>cron: 0 30 11 * * 1-5<br/>UTC 11:30 | IST 17:00<br/>Duration 00:00 (single fire)<br/>Mon-Fri, ONCE PER DAY<br/>(TEST_MODE: once after window ends)"]
+        T4["forced_backup<br/>only if FORCE_BACKUP_ID set and TEST_MODE=false<br/>runs once at app startup (run_on_startup)<br/>once per FORCE_BACKUP_ID value"]
     end
 
     T1 --> DS_RUN["DailyScheduler.run()"]
     T2 --> LS_RUN["LiveScheduler.run()"]
     T3 --> DS_BK["DailyScheduler.run_backup()"]
+    T4 --> DS_FBK["DailyScheduler.run_forced_backup()"]
 
-    DS_RUN --> HIST[("History candles<br/>ParquetCacheManager")]
+    DS_RUN --> HIST[("History candles<br/>candle-cache container<br/>never backed up or deleted")]
     DS_RUN --> CHAIN0[("Baseline option chain<br/>OptionChainCacheManager")]
     LS_RUN --> CHAIN[("Live option chain<br/>OptionChainCacheManager")]
-    DS_BK --> TG["MarketDataBackupService<br/>zip -> Telegram (TelegramService)"]
+    DS_BK --> TG["MarketDataBackupService<br/>zip -> Telegram parts (TelegramService)<br/>then status message"]
+    DS_FBK --> TG
     TG -. "Telegram failed" .-> FAILED[("backup-failed container<br/>fallback ZIP")]
     DS_RUN -. progress .-> PRG[("DailyProgress<br/>per-day record")]
     DS_BK -. progress .-> PRG
+    DS_FBK -. "force_backup_ID record" .-> PRG
+```
+
+## Backup flow (end to end)
+
+```mermaid
+flowchart TD
+    subgraph Start["Triggers"]
+        S1(["daily_market_backup timer<br/>UTC 11:30 | IST 17:00, Mon-Fri<br/>Trigger label: scheduled timer"])
+        S2(["forced_backup at startup<br/>FORCE_BACKUP_ID set, TEST_MODE=false<br/>Trigger label: forced (FORCE_BACKUP_ID)"])
+    end
+
+    S1 --> G1{Holiday / weekend?}
+    G1 -- yes --> END0([Skip])
+    G1 -- no --> C
+    S2 --> G2{ID already done?}
+    G2 -- yes --> END0
+    G2 -- no --> C[Container = market-data-cache<br/>+ broker-master]
+
+    C --> Z[Build one ZIP<br/>folders: container/blob path<br/>3 attempts, 5s backoff]
+    Z --> ZE{Empty or failed?}
+    ZE -- "nothing to back up / zip failed" --> ERR([Alert, keep data, retry up to MAX_ATTEMPTS])
+    ZE -- ok --> P[Split into parts<br/>size = TELEGRAM_PART_BYTES, default 5MB, max 49MB]
+    P --> U[Upload each part to Telegram<br/>3 retries per part, 4s pause between parts<br/>caption: Backup / Source / Trigger / Date<br/>Blobs + ZIP size + per-container blobs and size<br/>+ join instructions]
+    U --> UO{All parts sent?}
+    UO -- yes --> D0
+    UO -- no --> FB[Save whole ZIP to backup-failed/date/container.zip]
+    FB --> FBO{Saved?}
+    FBO -- no --> ERR2([Alert, keep data, run fails])
+    FBO -- yes --> D0{Delete allowed?}
+
+    D0 -- "scheduled: DELETE_AFTER_BACKUP=true<br/>forced: also FORCE_BACKUP_DELETE=true<br/>not a local run" --> DEL[Delete market-data-cache and broker-master<br/>up to MAX_ATTEMPTS]
+    D0 -- no --> KEEP[Keep containers]
+    DEL --> DO{Deleted?}
+    DO -- yes --> ST1[/"Status message<br/>Container-Deleted: true"/]
+    DO -- no --> ST2[/"Status message<br/>Container-Deleted: false"/]
+    KEEP --> ST2
+    ST1 --> FIN([Done])
+    ST2 --> FIN
+    FB -. "status adds: ZIP ONLY in backup-failed" .-> ST2
+```
+
+Status message format (also the first lines of each part caption):
+
+```
+Backup: market-data-cache, broker-master
+Source: prod (market-data-func)
+Trigger: forced (FORCE_BACKUP_ID)
+Date: 2026-11-22 10:06 IST
+Blobs: 344 | ZIP: 21,045,993 bytes
+Blobs: market-data-cache - 300 blobs, 19,000,000 bytes
+Blobs: broker-master - 44 blobs, 2,000,000 bytes
+Container-Deleted: true | false
 ```
 
 ## daily_job -> DailyScheduler.run()
@@ -151,7 +211,8 @@ flowchart TD
     M -- "Nothing to back up,<br/>zip failed or fallback save failed" --> P[Log error, skip deletion<br/>retry limited by MAX_ATTEMPTS] --> F
     N --> O[Delete backed-up container<br/>if DELETE_AFTER_BACKUP]
     N2 --> O
-    O --> Z3([Return True])
+    O --> S[Send status message<br/>Container-Deleted: true or false]
+    S --> Z3([Return True])
 ```
 
 ### MarketDataBackupService.run()
@@ -164,7 +225,7 @@ flowchart TD
     C -- no --> D[Build ZIP<br/>up to 3 attempts, 5s backoff]
     D --> E{ZIP built?}
     E -- no --> E1[/"Telegram alert: zip failed<br/>(exception type only)"/] --> X1([Raise: run fails])
-    E -- yes --> F[Send to Telegram<br/>split if over size limit, 3 retries per part]
+    E -- yes --> F[Send to Telegram in parts<br/>TELEGRAM_PART_BYTES default 5MB, 4s pause between parts<br/>3 retries per part]
     F --> G{Sent?}
     G -- yes --> OK([Success])
     G -- no --> H[/"Telegram alert: send failed<br/>(partial parts: N of M, must not be used)"/]

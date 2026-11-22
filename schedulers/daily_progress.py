@@ -16,6 +16,8 @@ from utils.blob_utils import BlobUtils
 logger = logging.getLogger(__name__)
 
 STATUS_DONE = "done"
+# Never backed up or deleted, unlike the market data cache.
+STATE_CONTAINER = "scheduler-state"
 
 
 class DailyProgress:
