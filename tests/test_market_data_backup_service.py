@@ -177,14 +177,15 @@ def test_telegram_and_fallback_failure_raises_so_data_is_kept(monkeypatch):
     assert "Nothing was delivered" in telegram.messages[0]
 
 
-def test_deletion_notice_says_backup_is_only_in_backup_failed(monkeypatch):
+def test_status_notice_says_backup_is_only_in_backup_failed(monkeypatch):
     telegram = FakeTelegram()
     service = _service(monkeypatch, {"market": ["a.csv"]}, telegram, None)
     result = svc.BackupResult("market", 1, 10, 5, (), fallback_blob="2026-11-21/market.zip")
 
-    service.notify_container_deleted(result)
+    service.notify_backup_status(result, deleted=True)
 
     assert "ONLY in backup-failed/2026-11-21/market.zip" in telegram.messages[0]
+    assert telegram.messages[0].endswith("Container-Deleted: true")
 
 
 def test_partial_split_upload_alert_states_parts_received(monkeypatch):
@@ -235,7 +236,7 @@ def test_zip_is_split_by_telegram_part_bytes_setting(monkeypatch, tmp_path):
     telegram = FakeTelegram()
     telegram.send_document = lambda path, caption: sent.append(path.stat().st_size) or captions.append(caption) or len(sent)
     service = MarketDataBackupService(container_name="market", blob_sync=SimpleNamespace())
-    result = SimpleNamespace(blob_count=1, zip_bytes=2500)
+    result = SimpleNamespace(blob_count=1, zip_bytes=2500, container_stats=())
 
     ids = service._send_to_telegram(telegram, zip_path, ["market"], datetime.now(), result)
 
@@ -279,14 +280,21 @@ def test_failed_broker_master_delete_is_reported_and_retry_succeeds(monkeypatch)
     assert service.delete_source_container() is True
 
 
-def test_live_deletion_notice_lists_broker_master(monkeypatch):
+def test_status_notice_uses_summary_format_and_reports_not_deleted(monkeypatch):
     monkeypatch.setattr(BlobUtils, "market_data_cache_blob", staticmethod(lambda: "market"))
     telegram = FakeTelegram()
     service = _service(monkeypatch, {"market": ["a.csv"]}, telegram, None)
 
-    service.notify_container_deleted(svc.BackupResult("market", 1, 10, 5, (1,)))
+    service.notify_backup_status(
+        svc.BackupResult("market", 1, 10, 5, (1,), container_stats=(("market", 1, 10), ("broker-master", 2, 7))),
+        deleted=False,
+    )
 
-    assert f"Container: market, {BlobUtils.BROKER_DATA_BLOB}" in telegram.messages[0]
+    lines = telegram.messages[0].splitlines()
+    assert lines[0] == f"Backup: market, {BlobUtils.BROKER_DATA_BLOB}"
+    assert "Blobs: market - 1 blobs, 10 bytes" in lines
+    assert "Blobs: broker-master - 2 blobs, 7 bytes" in lines
+    assert lines[-1] == "Container-Deleted: false"
 
 
 def test_source_label_in_caption_and_alert(monkeypatch):

@@ -1062,7 +1062,7 @@ def test_backup_stops_after_three_failures_or_success_despite_restart_and_deleti
         def source_container_exists(self):
             return "test-cache" in containers
 
-        def notify_container_deleted(self, result):
+        def notify_backup_status(self, result, deleted):
             return 2
 
     monkeypatch.setattr(EnvConfig, "_overrides", {
@@ -1129,7 +1129,7 @@ def _run_live_backup(monkeypatch, backup_cls):
     return result, json.loads(store["daily_progress/2026-11-05_live_backup.json"])
 
 
-def _backup_double(run, deleted):
+def _backup_double(run, deleted, statuses=None):
     class FakeBackup:
         def __init__(self, container_name, trigger=None):
             self.container_name = container_name
@@ -1145,7 +1145,9 @@ def _backup_double(run, deleted):
             deleted.append(self.container_name)
             return True
 
-        def notify_container_deleted(self, result):
+        def notify_backup_status(self, result, was_deleted):
+            if statuses is not None:
+                statuses.append(was_deleted)
             return 1
 
     return FakeBackup
@@ -1228,7 +1230,22 @@ def test_forced_backup_labels_its_trigger(monkeypatch):
 
     _forced_backup(monkeypatch, {"TEST_MODE": "false", "FORCE_BACKUP_ID": "t"}, Spy)()
 
-    assert triggers == [daily_scheduler_module.TRIGGER_FORCED]
+    assert set(triggers) == {daily_scheduler_module.TRIGGER_FORCED}
+
+
+def test_forced_backup_reports_container_deleted_status(monkeypatch):
+    result = SimpleNamespace(container="cache", blob_count=1, zip_bytes=3, telegram_message_ids=(1,), fallback_blob=None)
+    kept, removed = [], []
+
+    _forced_backup(monkeypatch, {"TEST_MODE": "false", "FORCE_BACKUP_ID": "k"}, _backup_double(lambda: result, [], kept))()
+    _forced_backup(
+        monkeypatch, {"TEST_MODE": "false", "FORCE_BACKUP_ID": "d", "FORCE_BACKUP_DELETE": "true"},
+        _backup_double(lambda: result, [], removed),
+    )()
+
+    assert kept == [False]
+    assert removed == [True]
+
 
 def test_forced_backup_deletes_only_when_asked(monkeypatch):
     deleted = []
