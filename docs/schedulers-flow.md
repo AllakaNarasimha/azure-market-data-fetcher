@@ -38,6 +38,8 @@ With `TEST_MODE=false`, setting `FORCE_BACKUP_ID=<value>` makes the next app sta
 
 The backup ZIP is sent in parts of at most `TELEGRAM_PART_BYTES` (default `5MB`; accepts `512KB`, `8MB` or plain bytes, 1024-based; always capped at Telegram's 49 MB limit), with a 4 s pause between parts to stay under Telegram's group rate limit. Small parts survive dropped connections that big uploads do not. Each part's caption explains how to join the parts. If any part fails, the whole ZIP is saved to `backup-failed`.
 
+After every successful backup a final status message is sent in the same format as the part captions (`Backup:`, `Source:`, `Trigger:`, `Date:`, `Blobs | ZIP`) ending with `Container-Deleted: true|false`. It is `false` when the container is kept (for example a forced run without `FORCE_BACKUP_DELETE=true`, `DELETE_AFTER_BACKUP=false`, or a failed deletion). If Telegram failed, the message also says the ZIP is only in `backup-failed`.
+
 ## Overview
 
 ```mermaid

@@ -225,9 +225,19 @@ class DailyScheduler:
             # Leaves a trace in the day's record: the only copy is in backup-failed, not Telegram.
             progress.note(f"fallback:{container}", result.fallback_blob)
         progress.record(task, True)
-        if delete:
-            self._delete_backed_up_container(progress, delete_task, container, result=result)
+        deleted = self._delete_backed_up_container(progress, delete_task, container, result=result) if delete else False
+        self._notify_backup_status(container, result, deleted)
         return True
+
+    def _notify_backup_status(self, container: str, result, deleted: bool) -> None:
+        try:
+            message_id = self._backup_service(container).notify_backup_status(result, deleted)
+            logging.info(
+                "[DailyScheduler] Backup status notification sent: container=%s deleted=%s telegram_message_id=%d",
+                container, deleted, message_id,
+            )
+        except Exception:
+            logging.exception("[DailyScheduler] Backup finished (deleted=%s) but Telegram status notification failed", deleted)
 
     @staticmethod
     def _log_backup_result(result) -> None:
@@ -249,23 +259,26 @@ class DailyScheduler:
         if delete:
             self._delete_backed_up_container(progress, delete_task, container, result=None, empty=True)
 
-    def _delete_backed_up_container(self, progress, delete_task: str, container: str, result, empty: bool = False) -> None:
-        """Delete the backed-up container once. A restart (result None) may delete only in TEST_MODE; an empty one always may."""
+    def _delete_backed_up_container(self, progress, delete_task: str, container: str, result, empty: bool = False) -> bool:
+        """Delete the backed-up container once; True when it was deleted in this call.
+
+        A restart (result None) may delete only in TEST_MODE; an empty one always may.
+        """
         if result is None and not empty and not self._test_mode(datetime.now(pytz.timezone(MarketTimes.timezone()))):
             logging.info("[DailyScheduler] Container deletion skipped: no backup in this run; container=%s", container)
-            return
+            return False
         backup_service = self._backup_service(container)
         if progress.is_finished(delete_task):
             if not backup_service.source_container_exists():
                 logging.info("[DailyScheduler] Container already deleted; container=%s", container)
-                return
+                return False
             logging.warning("[DailyScheduler] Container exists again after an earlier deletion; deleting again; container=%s", container)
         if not EnvConfig.delete_after_backup():
             logging.info("[DailyScheduler] Container deletion skipped: DELETE_AFTER_BACKUP=false; container=%s", container)
-            return
+            return False
         if BlobUtils.is_running_locally():
             logging.warning("[DailyScheduler] DELETE_AFTER_BACKUP ignored on a local run; container %s kept", container)
-            return
+            return False
 
         logging.info("[DailyScheduler] Deleting backed-up container: DELETE_AFTER_BACKUP=true; container=%s", container)
         for attempt in range(1, progress.MAX_ATTEMPTS + 1):
@@ -276,17 +289,9 @@ class DailyScheduler:
                 deleted = False
             if deleted:
                 progress.record(delete_task, True)
-                if result is not None:
-                    try:
-                        message_id = backup_service.notify_container_deleted(result)
-                        logging.info(
-                            "[DailyScheduler] Container deletion notification sent: container=%s telegram_message_id=%d",
-                            container, message_id,
-                        )
-                    except Exception:
-                        logging.exception("[DailyScheduler] Container %s deleted but Telegram notification failed", container)
-                return
+                return True
         logging.error("[DailyScheduler] Container deletion stopped after %d attempts; container=%s", progress.MAX_ATTEMPTS, container)
+        return False
 
     def _run_task(self, progress, task: str, label: str, symbol: str, work) -> bool | None:
         """Run one symbol's work. Returns None when the time budget is used up (caller must stop).

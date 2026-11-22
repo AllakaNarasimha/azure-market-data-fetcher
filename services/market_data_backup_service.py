@@ -49,6 +49,7 @@ class BackupResult:
     zip_bytes: int
     telegram_message_ids: tuple[int, ...]
     fallback_blob: Optional[str] = None  # Set when Telegram failed and the ZIP went to FAILED_BACKUP_CONTAINER.
+    container_stats: tuple[tuple[str, int, int], ...] = ()  # (container, blob count, source bytes) per container.
 
 
 TRIGGER_TIMER = "scheduled timer"
@@ -68,6 +69,7 @@ class MarketDataBackupService:
         self.trigger = trigger
         self.container_name = container_name or BlobUtils.market_data_cache_blob()
         self._blob_sync = blob_sync or BlobSync()
+        self._container_stats: list[tuple[str, int, int]] = []
 
     @staticmethod
     def _safe_blob_name(blob_name: str) -> str:
@@ -106,28 +108,29 @@ class MarketDataBackupService:
     def source_container_exists(self) -> bool:
         return self._blob_sync.container_exists(self.container_name)
 
-    def notify_container_deleted(self, result: BackupResult) -> int:
-        now = datetime.now(pytz.timezone(MarketTimes.timezone()))
-        if result.fallback_blob:
-            outcome = f"Blob container deleted; backup is ONLY in {FAILED_BACKUP_CONTAINER}/{result.fallback_blob} (Telegram failed)"
-            delivered = f"Telegram message ID(s) received: {', '.join(str(i) for i in result.telegram_message_ids) or 'none'}"
-        else:
-            outcome = "Blob container deleted after successful backup"
-            delivered = f"Backup message ID(s): {', '.join(str(i) for i in result.telegram_message_ids)}"
-        containers = self.container_name
-        if self._also_deletes_broker_master():
-            containers = f"{self.container_name}, {BlobUtils.BROKER_DATA_BLOB}"
-        return TelegramService.from_environment().send_message(
-            f"{outcome}\n"
+    def _summary(self, containers: list[str], now: datetime, result: BackupResult) -> str:
+        """The message body shared by the document caption and the final status message."""
+        per_container = "".join(
+            f"\nBlobs: {name} - {count} blobs, {size:,} bytes" for name, count, size in result.container_stats
+        )
+        return (
+            f"Backup: {', '.join(containers)}\n"
             f"Source: {EnvConfig.source_label()}\n"
             f"Trigger: {self.trigger}\n"
-            f"Container: {containers}\n"
-            f"Date: {now:%Y-%m-%d %H:%M:%S} {now.tzname()}\n"
-            f"Total backed-up blobs (market data and broker masters): {result.blob_count}\n"
-            f"Total source data: {result.source_bytes:,} bytes\n"
-            f"Backup ZIP: {result.zip_bytes:,} bytes\n"
-            f"{delivered}"
+            f"Date: {now:%Y-%m-%d %H:%M} {now.tzname()}\n"
+            f"Blobs: {result.blob_count} | ZIP: {result.zip_bytes:,} bytes"
+            f"{per_container}"
         )
+
+    def notify_backup_status(self, result: BackupResult, deleted: bool) -> int:
+        """Final message after the upload: the summary plus whether the source container was deleted."""
+        now = datetime.now(pytz.timezone(MarketTimes.timezone()))
+        containers = list(dict.fromkeys((self.container_name, BlobUtils.BROKER_DATA_BLOB)))
+        text = self._summary(containers, now, result)
+        if result.fallback_blob:
+            text += f"\nTelegram upload FAILED: ZIP is ONLY in {FAILED_BACKUP_CONTAINER}/{result.fallback_blob}"
+        text += f"\nContainer-Deleted: {str(deleted).lower()}"
+        return TelegramService.from_environment().send_message(text)
 
     def run(self) -> BackupResult:
         telegram = TelegramService.from_environment()  # Fail before download.
@@ -164,6 +167,7 @@ class MarketDataBackupService:
                 source_bytes=source_bytes,
                 zip_bytes=zip_bytes,
                 telegram_message_ids=(),
+                container_stats=tuple(self._container_stats),
             )
             try:
                 message_ids = self._send_to_telegram(telegram, zip_path, containers, now, result)
@@ -215,13 +219,7 @@ class MarketDataBackupService:
         for index, part_path in enumerate(parts, start=1):
             if index > 1:
                 time.sleep(PART_PAUSE_SECONDS)  # Telegram allows about 20 messages a minute to a group.
-            caption = (
-                f"Market data and broker master backup: {', '.join(containers)}\n"
-                f"Source: {EnvConfig.source_label()}\n"
-                f"Trigger: {self.trigger}\n"
-                f"Date: {now:%Y-%m-%d %H:%M} {now.tzname()}\n"
-                f"Blobs: {result.blob_count} | ZIP: {result.zip_bytes:,} bytes"
-            )
+            caption = self._summary(containers, now, result)
             if len(parts) > 1:
                 # Wildcards keep the caption short; with many parts a name list would pass Telegram's 1024-char caption limit.
                 caption += (
@@ -273,8 +271,10 @@ class MarketDataBackupService:
             logger.warning("[Backup] Container=%s is empty; backing up the remaining containers", name)
 
         # Stream each blob straight into the ZIP so the container is never staged uncompressed on disk.
+        stats: list[tuple[str, int, int]] = []
         with ZipFile(zip_path, mode="w", compression=ZIP_DEFLATED, compresslevel=6, allowZip64=True) as archive:
             for container_name in containers:
+                bytes_before = source_bytes
                 container_client = self._blob_sync.get_container(container_name)
                 container_blob_count = 0
                 for blob in container_blobs[container_name]:
@@ -286,7 +286,9 @@ class MarketDataBackupService:
                             source_bytes += len(chunk)
                     container_blob_count += 1
                 blob_count += container_blob_count
+                stats.append((container_name, container_blob_count, source_bytes - bytes_before))
                 logger.info("[Backup] Archived container=%s blobs=%d", container_name, container_blob_count)
+        self._container_stats = stats
         return blob_count, source_bytes
 
     def _save_failed_zip(self, zip_path: Path, now: datetime) -> str:
