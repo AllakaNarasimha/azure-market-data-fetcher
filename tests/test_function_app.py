@@ -563,6 +563,44 @@ def test_registry_log_off_many_writes_once_and_keeps_every_entry(tmp_path, monke
     assert set(stored["df"]["reason"]) == {CacheConstants.DATA_GAP}
 
 
+def test_candle_cache_uses_its_own_container_not_the_backed_up_one(tmp_path, monkeypatch):
+    from storage.parquet_cache_manager import ParquetCacheManager
+
+    monkeypatch.setattr(EnvConfig, "_overrides", {"MARKET_DATA_CACHE_BLOB": "market-data-cache", "CANDLE_CACHE_BLOB": "candles-x"})
+    manager = ParquetCacheManager(cache_dir=str(tmp_path))
+    containers = []
+
+    class FakeLake:
+        def read(self, blob_name, missing_ok=False):
+            return None
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def open_parquet(path, container_name=None):
+        containers.append(container_name)
+        yield FakeLake()
+
+    monkeypatch.setattr(manager, "_blob_sync", SimpleNamespace(open_parquet=open_parquet))
+    monkeypatch.setattr(daily_scheduler_module.BlobUtils, "is_running_locally", staticmethod(lambda: False))
+
+    manager._load_partition("NSE:A-EQ", "1", 2026, 11)
+
+    assert manager.container_name == "candles-x"
+    assert manager.registry.container_name is None
+    assert containers == ["candles-x"]
+
+
+def test_test_mode_candle_cache_keeps_the_test_container(monkeypatch):
+    from storage.parquet_cache_manager import ParquetCacheManager
+
+    monkeypatch.setattr(EnvConfig, "_overrides", {"TEST_MODE": "true"})
+    monkeypatch.setattr(daily_scheduler_module.BlobUtils, "is_running_locally", staticmethod(lambda: False))
+    test_dir = os.path.join(os.environ.get("TEMP", "."), "test_mode_data", "market_data_cache")
+
+    assert ParquetCacheManager(cache_dir=test_dir).container_name is None
+
+
 def test_save_candles_logs_all_gaps_in_one_registry_update(tmp_path, monkeypatch):
     from storage.parquet_cache_manager import CacheRegistry, ParquetCacheManager
 
@@ -603,6 +641,53 @@ def _daily_scheduler_for_resume(monkeypatch, tmp_path, symbols, chain_symbols=""
     monkeypatch.setattr(scheduler, "_fetch_history_if_missing", fetch)
     monkeypatch.setattr(fa.DailyScheduler, "_fetch_option_chain", staticmethod(lambda *a, **k: None))
     return fa, scheduler, calls
+
+
+def _history_fetch_double(monkeypatch, missing):
+    requests, saved = [], []
+    manager = SimpleNamespace(get_historical_data=lambda instrument, interval, kind, start, end: requests.append((start, end)) or "resp")
+    cache = SimpleNamespace(
+        get_missing_date_ranges=lambda symbol, start, end, interval: missing,
+        clean_and_save_candles=lambda symbol, candles, **kw: saved.append(kw),
+    )
+    monkeypatch.setattr(bdm.HistoryNormalizer, "to_candles", staticmethod(lambda broker, response: [{"timestamp": 1}]))
+    scheduler = daily_scheduler_module.DailyScheduler(history_days=90, history_interval="1")
+    return scheduler, manager, cache, requests, saved
+
+
+def test_history_fetches_only_the_dates_missing_since_the_last_run(monkeypatch):
+    missing = [(datetime(2026, 11, 16, 9, 15), datetime(2026, 11, 17, 15, 30))]
+    scheduler, manager, cache, requests, saved = _history_fetch_double(monkeypatch, missing)
+
+    ok = scheduler._fetch_history_if_missing(
+        manager, "fyers", SimpleNamespace(symbol="NSE:A-EQ"), cache, datetime(2026, 8, 1), datetime(2026, 11, 20)
+    )
+
+    assert ok is True
+    assert requests == [("2026-11-16", "2026-11-17")]
+    assert saved[0]["fetch_start"] == datetime(2026, 11, 16, 0, 0)
+    assert saved[0]["fetch_end"] == datetime(2026, 11, 17, 23, 59, 59)
+
+
+def test_history_skips_the_broker_when_nothing_is_missing(monkeypatch):
+    scheduler, manager, cache, requests, saved = _history_fetch_double(monkeypatch, [])
+
+    assert scheduler._fetch_history_if_missing(
+        manager, "fyers", SimpleNamespace(symbol="NSE:A-EQ"), cache, datetime(2026, 8, 1), datetime(2026, 11, 20)
+    ) is True
+    assert requests == []
+
+
+def test_missing_days_merge_over_a_weekend_but_not_across_weeks():
+    missing = [
+        (datetime(2026, 11, 6, 9, 15), datetime(2026, 11, 6, 15, 30)),
+        (datetime(2026, 11, 9, 9, 15), datetime(2026, 11, 9, 15, 30)),
+        (datetime(2026, 11, 20, 9, 15), datetime(2026, 11, 20, 15, 30)),
+    ]
+
+    ranges = daily_scheduler_module.DailyScheduler._missing_day_ranges(missing)
+
+    assert [(str(a), str(b)) for a, b in ranges] == [("2026-11-06", "2026-11-09"), ("2026-11-20", "2026-11-20")]
 
 
 def test_daily_job_resumes_where_the_budget_ran_out(monkeypatch, tmp_path, market_session):

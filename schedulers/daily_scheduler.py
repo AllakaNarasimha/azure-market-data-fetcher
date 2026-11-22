@@ -1,7 +1,7 @@
 import logging
 import math
 import time
-from datetime import datetime
+from datetime import date, datetime, time as dtime, timedelta
 import pytz
 
 import brokers.broker_data_manager as bdm
@@ -11,7 +11,7 @@ from storage.parquet_cache_manager import ParquetCacheManager
 from storage.market_data_cache import OptionChainCacheManager
 from utils.env_config import EnvConfig
 from utils.shared_cache import EXPIRIES_CACHE
-from schedulers.daily_progress import DailyProgress, STATUS_DONE
+from schedulers.daily_progress import DailyProgress, STATE_CONTAINER, STATUS_DONE
 from schedulers.market_calendar import MarketCalendar
 from schedulers.scheduler_utils import build_scheduler_context, is_test_mode
 from schedulers.live_scheduler import LiveScheduler
@@ -91,7 +91,7 @@ class DailyScheduler:
         progress: DailyProgress | None = None
         self._deadline = None
         if time_budget_seconds is not None:
-            container = BlobUtils.test_mode_cache_blob() if ctx.use_test_cache else BlobUtils.market_data_cache_blob()
+            container = BlobUtils.test_mode_cache_blob() if ctx.use_test_cache else STATE_CONTAINER
             progress = DailyProgress(self._run_key(now), container=container, local_dir=test_cache_dir)
             all_tasks = [f"history:{s}" for s in symbols] + [f"chain:{s}" for s in option_chain_symbols]
             remaining = progress.pending(all_tasks)
@@ -171,7 +171,7 @@ class DailyScheduler:
             run_key = f"{now:%Y-%m-%d}_test_{EnvConfig.get_test_mode_expiry():%Y%m%dT%H%M%S}_backup"
         else:
             run_key = f"{now:%Y-%m-%d}_live_backup"
-        progress = DailyProgress(run_key, container="scheduler-state", strict=True)
+        progress = DailyProgress(run_key, container=STATE_CONTAINER, strict=True)
         return self._backup_container(progress, container)
 
     def run_forced_backup(self) -> bool:
@@ -186,7 +186,7 @@ class DailyScheduler:
         if EnvConfig.test_mode():
             logging.info("[DailyScheduler] FORCE_BACKUP_ID ignored: TEST_MODE has its own backup")
             return True
-        progress = DailyProgress(f"force_backup_{force_id}", container="scheduler-state", strict=True)
+        progress = DailyProgress(f"force_backup_{force_id}", container=STATE_CONTAINER, strict=True)
         self._forced = True
         return self._backup_container(
             progress, BlobUtils.market_data_cache_blob(), delete=EnvConfig.force_backup_delete()
@@ -367,35 +367,58 @@ class DailyScheduler:
 
         return saved
 
+    @staticmethod
+    def _missing_day_ranges(missing: list, merge_gap_days: int = 3) -> list[tuple[date, date]]:
+        """Turn slot-level gaps into whole-day (first, last) ranges so each gap costs one broker request.
+
+        Ranges closer than `merge_gap_days` (a weekend) are merged; re-fetching cached days is harmless.
+        """
+        days = sorted((start.date(), (end - timedelta(seconds=1)).date()) for start, end in missing)
+        merged: list[list[date]] = []
+        for first, last in days:
+            if merged and (first - merged[-1][1]).days <= merge_gap_days:
+                merged[-1][1] = max(merged[-1][1], last)
+            else:
+                merged.append([first, last])
+        return [(first, last) for first, last in merged]
+
     def _fetch_history_if_missing(self, manager, broker_name, instrument, candle_cache, start_date, end_date) -> bool:
+        """Fetch only the days in [start_date, end_date] that the cache lacks, e.g. the dates since the last run."""
+        symbol = instrument.symbol
         try:
-            cached = candle_cache.load_candles(instrument.symbol, start_date, end_date, interval=self.history_interval)
-            if cached:
-                logging.info(
-                    f"[DailyScheduler] {instrument.symbol} ({broker_name}) history already cached "
-                    f"({len(cached)} candles); skipping fetch"
-                )
+            missing = candle_cache.get_missing_date_ranges(symbol, start_date, end_date, interval=self.history_interval)
+            if not missing:
+                logging.info(f"[DailyScheduler] {symbol} ({broker_name}) history already cached; skipping fetch")
                 return True
 
-            response = manager.get_historical_data(
-                instrument, self.history_interval, "EQUITY", start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
-            )
-            candles = bdm.HistoryNormalizer.to_candles(broker_name, response)
-            if not candles:
-                reason = bdm.fyers_error_text(response) or "no candles in response"
-                logging.warning(f"[DailyScheduler] {instrument.symbol} ({broker_name}) history fetch empty: {reason}")
-                return False
-
-            candle_cache.clean_and_save_candles(
-                instrument.symbol, candles, interval=self.history_interval, fetch_start=start_date, fetch_end=end_date
-            )
-            logging.info(
-                f"[DailyScheduler] {instrument.symbol} ({broker_name}) history fetched & cached ({len(candles)} candles)"
-            )
-            return True
+            fetched = False
+            for first, last in self._missing_day_ranges(missing):
+                if self._fetch_history_days(manager, broker_name, instrument, candle_cache, first, last):
+                    fetched = True
+            return fetched
         except Exception as ex:
-            logging.exception(f"[DailyScheduler] {instrument.symbol} ({broker_name}) history fetch failed: {ex!r}")
+            logging.exception(f"[DailyScheduler] {symbol} ({broker_name}) history fetch failed: {ex!r}")
             return False
+
+    def _fetch_history_days(self, manager, broker_name, instrument, candle_cache, first: date, last: date) -> bool:
+        symbol = instrument.symbol
+        response = manager.get_historical_data(
+            instrument, self.history_interval, "EQUITY", first.strftime("%Y-%m-%d"), last.strftime("%Y-%m-%d")
+        )
+        candles = bdm.HistoryNormalizer.to_candles(broker_name, response)
+        if not candles:
+            reason = bdm.fyers_error_text(response) or "no candles in response"
+            logging.warning(f"[DailyScheduler] {symbol} ({broker_name}) history fetch {first}..{last} empty: {reason}")
+            return False
+
+        candle_cache.clean_and_save_candles(
+            symbol, candles, interval=self.history_interval,
+            fetch_start=datetime.combine(first, dtime.min), fetch_end=datetime.combine(last, dtime(23, 59, 59)),
+        )
+        logging.info(
+            f"[DailyScheduler] {symbol} ({broker_name}) history {first}..{last} fetched & cached ({len(candles)} candles)"
+        )
+        return True
 
     @staticmethod
     def _fetch_option_chain(manager, broker_name, instrument, chain_cache) -> bool:

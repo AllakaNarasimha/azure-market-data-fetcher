@@ -11,6 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from utils.blob_utils import BlobUtils, BlobSync
+from utils.cache_utils import is_test_blob_path
 
 from utils.market_times import MarketTimes
 
@@ -125,7 +126,8 @@ class CacheRegistry:
 
     BLOB_NAME = f"registry/{CacheConstants.REGISTRY_FILENAME}"
 
-    def __init__(self, cache_dir: str):
+    def __init__(self, cache_dir: str, container_name: Optional[str] = None):
+        self.container_name = container_name
         self.registry_path = os.path.abspath(
             os.path.join(cache_dir, CacheConstants.REGISTRY_FILENAME)
         )
@@ -138,14 +140,14 @@ class CacheRegistry:
     def load(self) -> pd.DataFrame:
         if not BlobUtils.is_running_locally():
             try:
-                with self._blob_sync.open_parquet(self.registry_path) as lake:
+                with self._blob_sync.open_parquet(self.registry_path, self.container_name) as lake:
                     df = lake.read(self.BLOB_NAME, missing_ok=True)
                 if df is not None and not df.empty:
                     return df
             except Exception as exc:
                 logger.warning("[REGISTRY] Failed to read registry from DataLake: %s", exc)
 
-        self._blob_sync.download_if_missing(self.registry_path, self.BLOB_NAME)
+        self._blob_sync.download_if_missing(self.registry_path, self.BLOB_NAME, self.container_name)
         if (
             os.path.exists(self.registry_path)
             and os.path.getsize(self.registry_path) > 0
@@ -201,7 +203,7 @@ class CacheRegistry:
             )
 
             if not BlobUtils.is_running_locally():
-                with self._blob_sync.open_parquet(self.registry_path) as lake:
+                with self._blob_sync.open_parquet(self.registry_path, self.container_name) as lake:
                     lake.upsert(self.BLOB_NAME, df, keys=CacheConstants.REGISTRY_COLUMNS)
             else:
                 df.to_parquet(
@@ -209,7 +211,7 @@ class CacheRegistry:
                     engine=CacheConstants.ENGINE,
                     index=False,
                 )
-                self._blob_sync.upload(self.registry_path, self.BLOB_NAME)
+                self._blob_sync.upload(self.registry_path, self.BLOB_NAME, self.container_name)
 
             for symbol, interval, start_dt, end_dt, reason in entries:
                 logger.info("[REGISTRY] %s | %s | %s → %s | %s", symbol, interval, start_dt, end_dt, reason)
@@ -415,6 +417,11 @@ class ParquetCacheManager:
     ):
         self.cache_dir = os.path.abspath(cache_dir or _local_cache_root(CacheConstants.CACHE_DIR))
         os.makedirs(self.cache_dir, exist_ok=True)
+
+        # Candles live in their own container because the daily backup deletes the market data cache.
+        # The test-mode cache keeps its own container and path mapping.
+        in_test_cache = is_test_blob_path(self.cache_dir, BlobUtils.is_running_locally())
+        self.container_name = None if in_test_cache else BlobUtils.candle_cache_blob()
 
         self.registry = CacheRegistry(self.cache_dir)
         self.market_session = market_session or MarketSession()
@@ -850,7 +857,7 @@ class ParquetCacheManager:
             blob_name = self._blob_name(symbol, interval, int(year), int(month))
 
             if not BlobUtils.is_running_locally():
-                with self._blob_sync.open_parquet(self.cache_dir) as lake:
+                with self._blob_sync.open_parquet(self.cache_dir, self.container_name) as lake:
                     lake.upsert(blob_name, write_df, keys=["timestamp"])
                 continue
 
@@ -859,7 +866,7 @@ class ParquetCacheManager:
             table = pa.Table.from_pandas(write_df, preserve_index=False)
             file_path = os.path.join(partition_path, "part-0.parquet")
             pq.write_table(table, file_path)
-            self._blob_sync.upload(file_path, blob_name)
+            self._blob_sync.upload(file_path, blob_name, self.container_name)
 
     def _load_partition(
         self,
@@ -870,7 +877,7 @@ class ParquetCacheManager:
     ) -> pd.DataFrame:
         if not BlobUtils.is_running_locally():
             try:
-                with self._blob_sync.open_parquet(self.cache_dir) as lake:
+                with self._blob_sync.open_parquet(self.cache_dir, self.container_name) as lake:
                     df = lake.read(self._blob_name(symbol, interval, year, month), missing_ok=True)
                 return df if df is not None else pd.DataFrame()
             except Exception as exc:
@@ -879,7 +886,7 @@ class ParquetCacheManager:
 
         partition_path = self._partition_path(symbol, interval, year, month)
         file_path = os.path.join(partition_path, "part-0.parquet")
-        self._blob_sync.download_if_missing(file_path, self._blob_name(symbol, interval, year, month))
+        self._blob_sync.download_if_missing(file_path, self._blob_name(symbol, interval, year, month), self.container_name)
 
         if not os.path.exists(partition_path):
             return pd.DataFrame()

@@ -178,6 +178,15 @@ class EnvConfig:
         return cls.env("MARKET_DATA_CACHE_BLOB", "market-data-cache") or "market-data-cache"
 
     @classmethod
+    def candle_cache_blob(cls) -> str:
+        """Blob container for the candle history and its gap registry (env `CANDLE_CACHE_BLOB`).
+
+        Kept apart from the market data cache because the daily backup deletes that container.
+        Default: 'candle-cache'
+        """
+        return cls.env("CANDLE_CACHE_BLOB", "candle-cache") or "candle-cache"
+
+    @classmethod
     def test_mode_cache_blob(cls) -> str:
         """Blob container name for test-mode cache (env `TEST_MODE_CACHE_BLOB`).
 
